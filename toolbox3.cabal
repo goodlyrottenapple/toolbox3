@@ -27,7 +27,7 @@ source-repository head
 
 library
   exposed-modules:
-      Lib, Core
+      Lib, Core, Test, LamPi
   other-modules:
       Paths_toolbox3
   hs-source-dirs:
@@ -42,6 +42,8 @@ library
     , hashable
     , mtl
     , bifunctors
+    , containers
+    , template-haskell
   default-language: Haskell2010
 
 executable toolbox3-exe
@@ -70,4 +72,5 @@ test-suite toolbox3-test
     , QuickCheck
     , text
     , string-conv
+    , containers
   default-language: Haskell2010
