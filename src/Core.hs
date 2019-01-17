@@ -74,6 +74,7 @@ argMap f (Named (Ctxt c) e) = Named (Ctxt $ S.map (expMap f) c) (f e)
 
 data Exp name where
     V :: name -> Exp name
+    String :: name -> Exp name 
     (:$:) :: Exp name -> Exp name -> Exp name -- e e
     (:|$|:) :: Exp name -> Exp name -> Exp name -- e e
     Pi :: Arg name -> Exp name -> Exp name -> Exp name
@@ -82,6 +83,7 @@ data Exp name where
 
 expMap :: Ord b => (a -> b) -> Exp a -> Exp b
 expMap f (V x) =  V $ f x
+expMap f (String x) =  String $ f x
 expMap f (e :$: e') =  expMap f e :$: expMap f e'
 expMap f (e :|$|: e') =  expMap f e :|$|: expMap f e'
 expMap f (Pi n e e') =  Pi (argMap f n) (expMap f e) (expMap f e')
@@ -136,6 +138,7 @@ class PPrint a where
 
 instance PPrint name => PPrint (Exp name) where
     pprint (V name) = pprint name
+    pprint (String s) = "\"" ++ pprint s ++ "\""
     pprint (e :$: (e' :$: f'))     = pprint e ++ " (" ++ pprint (e' :$: f') ++ ")"
     pprint (e :$: f)              = pprint e ++ " " ++ pprint f
     pprint (e :|$|: f)              = pprint e ++ " {" ++ pprint f ++"}"
@@ -407,7 +410,7 @@ tokenize start_loc is =
     flip evalState start_loc . 
     tokenizer (
         whitespace : newline : tab : 
-        ignoreInfixl : ignoreInfixr : ignoreInfix : ignoreComment :
+        ignoreInfixl : ignoreInfixr : ignoreInfix : ignoreComment : quotes :
         (map reservedKeyword $ sortBy longestFirst $ reservedKeywords ++ map symb is))
 
 
@@ -442,7 +445,7 @@ parseG'' tokenizer grammar t =
 var :: HS.Set Text -> Prod r e (Token Text) (Token Text)
 var reserved = satisfy (\t -> 
     let str = unTok t
-        head_letter = T.head str 
+        -- head_letter = T.head str 
     in
         not (str `HS.member` reserved) &&
         T.length str > 0)
@@ -475,7 +478,7 @@ infixLang = mdo
     return expr
 
 reservedKeywords :: [Text]
-reservedKeywords = ["(", ")", "{", "}", "[", "]", "=>", "->", ":", ",", "data", "def", "end", "where", "bind", "in", "|", "infix", "infixl", "infixr"] 
+reservedKeywords = ["\"", "(", ")", "{", "}", "[", "]", "=>", "->", ":", ",", "data", "def", "end", "where", "bind", "|", "infix", "infixl", "infixr"] 
 
 bracketed :: (Eq b, IsString b) => Prod r b b a -> Prod r b b a
 bracketed x = namedToken "(" *> x <* namedToken ")"
@@ -487,7 +490,12 @@ expLang infxLst = mdo
             V <$> name
         <|> V <$> (namedToken "(" *> satisfy (\s -> unTok s `HS.member` (HS.fromList $ map symb infxLst)) <* namedToken ")")
 
+    stringR <- rule $ 
+            String <$> (namedToken "\"" *> satisfy (\s -> True) <* namedToken "\"")
+
+
     atom <- rule $ varR
+        <|> stringR
         <|> namedToken "(" *> expr <* namedToken ")"
     appR <- rule $ 
             atom 
@@ -505,7 +513,7 @@ expLang infxLst = mdo
     return expr
     where
         appFun :: (Holey (Token Text) -> [Exp (Token Text)] -> Exp (Token Text))
-        appFun [Nothing,Just t, Nothing] xs | t == "->" = foldl (:$:) (V t) xs
+        appFun [Nothing,Just t, Nothing] xs = foldl (:$:) (V t) xs
 
         table :: [[(Holey (Prod r (Token Text) (Token Text) (Token Text)), Associativity)]]
         table = map (map infixToHoley) sortedXs
@@ -577,15 +585,21 @@ mkTerm vars (e :|$|: e') = do
 mkTerm vars (Pi (Unnamed _) e e') = (LamPi.Π) <$> mkTerm vars e <*> mkTerm ("":vars) e'
 mkTerm vars (Pi (Named _ (Token n _ _ _ _)) e e') = (LamPi.Π) <$> mkTerm vars e <*> mkTerm (n:vars) e'
 mkTerm vars (Pi (Implicit _ (Token n _ _ _ _)) e e') = (LamPi.IΠ) <$> mkTerm vars e <*> mkTerm (n:vars) e'
+mkTerm vars (String (Token s _ _ _ _)) = return $ LamPi.MkString $ s
 mkTerm vars (V (Token "*" _ _ _ _)) = return LamPi.Star
 mkTerm vars (V (Token "Type" _ _ _ _)) = return LamPi.Star
+mkTerm vars (V (Token "String" _ _ _ _)) = return $ LamPi.String
 mkTerm vars (V (Token n _ _ _ _)) 
     | (Just i) <- elemIndex n vars = return $ LamPi.Bound i                           
     | otherwise = do
         constants <- get
-        unless (n `elem` constants) $ throwError $ "Variable " ++ toS n ++ "not declared!"
+        unless (n `elem` constants) $ throwError $ "Variable " ++ toS n ++ " not declared!"
         return $ LamPi.Free $ LamPi.Global n
 
+mkTerm0 :: MonadError String m => LamPi.Γ -> Exp (Token Text) -> m LamPi.Term
+mkTerm0 g e = flip evalStateT (foldr (\(n,_) xs -> case n of 
+    LamPi.Global x -> x:xs 
+    _ -> xs) [] g) (mkTerm [] e)
 
 makeDecl :: (MonadError String m, MonadState Constants m) => [Decl (Token Text)] -> m [LamPi.Decl]
 makeDecl [] = return []
