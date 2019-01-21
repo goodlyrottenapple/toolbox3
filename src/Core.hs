@@ -60,44 +60,27 @@ import Data.Data(Data,Typeable, cast)
 infixl :$:
 
 
-newtype Ctxt name = Ctxt { unCtxt :: Set (Exp name) } deriving (Eq, Show, Ord, Data, Typeable) 
+-- newtype Ctxt name = Ctxt { unCtxt :: Set (Exp name) } deriving (Eq, Show, Ord, Data, Typeable) 
 
-data Arg n = Implicit (Ctxt n) n | Unnamed (Ctxt n) | Named (Ctxt n) n -- | ImplicitNamedArr n 
-    deriving (Show, Eq, Ord, Data, Typeable)
+data Arg n = Implicit n | Unnamed | Named n | Synthesized -- | ImplicitNamedArr n 
+    deriving (Show, Eq, Ord, Data, Typeable, Functor)
 -- data AppKind n = ExplicitApp | ImplicitNamedApp n deriving (Show, Eq, Functor, Generic)
-
-argMap :: Ord b => (a -> b) -> Arg a -> Arg b
-argMap f (Implicit (Ctxt c) e) = Implicit (Ctxt $ S.map (expMap f) c) (f e)
-
-argMap f (Unnamed (Ctxt c)) = Unnamed (Ctxt $ S.map (expMap f) c)
-argMap f (Named (Ctxt c) e) = Named (Ctxt $ S.map (expMap f) c) (f e)
 
 data Exp name where
     V :: name -> Exp name
-    String :: name -> Exp name 
+    Name :: name -> Exp name 
     (:$:) :: Exp name -> Exp name -> Exp name -- e e
     (:|$|:) :: Exp name -> Exp name -> Exp name -- e e
     Pi :: Arg name -> Exp name -> Exp name -> Exp name
-    deriving (Show, Eq, Ord, Generic, Data, Typeable)
+    deriving (Show, Eq, Ord, Generic, Data, Typeable, Functor)
 
-
-expMap :: Ord b => (a -> b) -> Exp a -> Exp b
-expMap f (V x) =  V $ f x
-expMap f (String x) =  String $ f x
-expMap f (e :$: e') =  expMap f e :$: expMap f e'
-expMap f (e :|$|: e') =  expMap f e :|$|: expMap f e'
-expMap f (Pi n e e') =  Pi (argMap f n) (expMap f e) (expMap f e')
 
 
 data Binding n = Bind n n | Unbound deriving (Show, Eq, Functor, Generic, Data, Typeable)
 
 
 data TyCon name = TyCon name (Exp name) (Binding name) -- Just (n,t) is: bind n in t 
-    deriving (Show, Eq, Data, Typeable)
-
-
-tyConMap :: Ord b => (a -> b) -> TyCon a -> TyCon b
-tyConMap f (TyCon n ty b) = TyCon (f n) (expMap f ty) (fmap f b)
+    deriving (Show, Eq, Data, Typeable, Functor)
 
 
 -- data PClause name = PClause name (Map name (Exp name)) [Exp name] (Exp name) deriving (Show, Eq, Data, Typeable)
@@ -115,12 +98,7 @@ data Decl name =
     Data name (Exp name) [TyCon name] 
   -- | Def name (Exp name) [PClause name]
 
-  deriving (Show, Eq, Data, Typeable)
-
-
-declMap :: Ord b => (a -> b) -> Decl a -> Decl b
-declMap f (Data n args tycons) = Data (f n) (expMap f args) (map (tyConMap f) tycons)
--- declMap f (Def n args plcauses) = Def (f n) (map (argMap f) args) (map (pClauseMap f) plcauses) 
+  deriving (Show, Eq, Data, Typeable, Functor)
 
 -- pattern ENArr x = ExplicitNamedArr x
 -- pattern EArr    = ExplicitArr
@@ -138,22 +116,19 @@ class PPrint a where
 
 instance PPrint name => PPrint (Exp name) where
     pprint (V name) = pprint name
-    pprint (String s) = "\"" ++ pprint s ++ "\""
+    pprint (Name s) = "\'" ++ pprint s
     pprint (e :$: (e' :$: f'))     = pprint e ++ " (" ++ pprint (e' :$: f') ++ ")"
     pprint (e :$: f)              = pprint e ++ " " ++ pprint f
     pprint (e :|$|: f)              = pprint e ++ " {" ++ pprint f ++"}"
-    pprint (Pi (Implicit ctxt n) e e') = pprint ctxt ++ "{" ++ pprint n ++ " : " ++ pprint e ++ "} -> " ++ pprint e' 
-    pprint (Pi (Unnamed ctxt) e e') = pprint ctxt ++ 
+    pprint (Pi (Implicit n) e e') = "{" ++ pprint n ++ " : " ++ pprint e ++ "} -> " ++ pprint e' 
+    pprint (Pi Synthesized e e') = "[" ++ pprint e ++ "] -> " ++ pprint e' 
+    pprint (Pi Unnamed e e') = 
         (case e of 
             (Pi _ _ _) ->  "(" ++ pprint e ++ ")" 
             _ -> pprint e
         ) ++ " -> " ++ pprint e'
-    pprint (Pi (Named ctxt n) e e') = pprint ctxt ++ "(" ++ pprint n ++ " : " ++ pprint e ++ ") -> " ++ pprint e'
+    pprint (Pi (Named n) e e') = "(" ++ pprint n ++ " : " ++ pprint e ++ ") -> " ++ pprint e'
         
-
-instance PPrint name => PPrint (Ctxt name) where
-    pprint (Ctxt c) | S.null c = ""
-                    | otherwise = "{" ++ (intercalate "," $ map pprint $ S.toList c) ++ "} => " 
 
 -- instance PPrint name => PPrint [Arg name] where
 --     pprint [] = ""
@@ -337,6 +312,7 @@ reservedKeyword w = (w, f)
         f :: Text -> ([DropOrKeep Text],Text)
         f x = ([DropOrKeep New w], fromJust $ T.stripPrefix w x)
 
+
 block :: Text -> Text -> (Text, Text -> ([DropOrKeep Text],Text))
 block start end = (start, f)
     where
@@ -356,6 +332,24 @@ block start end = (start, f)
                 restAlt = T.dropWhile (\c -> not (c == ' ' || c == '\t' || c == '\n')) x
 
 
+
+
+blockLeft :: Text -> [Text] -> (Text, Text -> ([DropOrKeep Text],Text))
+blockLeft start e = (start, \x -> (\(_,x,y) -> (x,y)) $ head $ sortBy (\(a,_,_) (b,_,_) -> compare a b) $ tryEnd e x)
+    where
+
+        tryEnd :: [Text] -> Text -> [(Int,[DropOrKeep Text],Text)]
+        tryEnd [] x = []
+        -- if we find the cloing block `end` then we add start as Token and take the string inbetween
+        tryEnd (end:ends) x = 
+            if end `T.isPrefixOf` rest then
+                (T.length quotePrefix, [DropOrKeep New start, DropOrKeep New quotePrefix], rest) : tryEnd ends x
+            else 
+                tryEnd ends x
+            where
+                (quotePrefix, rest) = T.breakOn end $ T.drop (T.length start) x
+
+
 blockDrop :: Text -> Text -> (Text, Text -> ([DropOrKeep Text],Text))
 blockDrop start end = (start, f)
     where
@@ -366,6 +360,7 @@ blockDrop start end = (start, f)
                 rest = T.drop (T.length end) rest'
 
 quotes = block "\"" "\""
+name l = blockLeft "\'" (l ++ [" ", "\n", "\t"])
 
 
 
@@ -410,8 +405,10 @@ tokenize start_loc is =
     flip evalState start_loc . 
     tokenizer (
         whitespace : newline : tab : 
-        ignoreInfixl : ignoreInfixr : ignoreInfix : ignoreComment : quotes :
-        (map reservedKeyword $ sortBy longestFirst $ reservedKeywords ++ map symb is))
+        ignoreInfixl : ignoreInfixr : ignoreInfix : ignoreComment : name reserved :
+        map reservedKeyword reserved)
+    where
+        reserved = sortBy longestFirst $ reservedKeywords ++ map symb is
 
 
 
@@ -478,24 +475,23 @@ infixLang = mdo
     return expr
 
 reservedKeywords :: [Text]
-reservedKeywords = ["\"", "(", ")", "{", "}", "[", "]", "=>", "->", ":", ",", "data", "def", "end", "where", "bind", "|", "infix", "infixl", "infixr"] 
+reservedKeywords = ["\"", "(", ")", "{", "}", "[", "]", "=>", "->", ":", ",", "\'", "data", "def", "end", "where", "bind", "|", "infix", "infixl", "infixr"] 
 
 bracketed :: (Eq b, IsString b) => Prod r b b a -> Prod r b b a
 bracketed x = namedToken "(" *> x <* namedToken ")"
 
 expLang :: [Infix] -> G (Exp (Token Text))
 expLang infxLst = mdo
-    name <- rule $ var (HS.fromList $ reservedKeywords ++ map symb infxLst)
+    varName <- rule $ var (HS.fromList $ reservedKeywords ++ map symb infxLst)
     varR <- rule $ 
-            V <$> name
+            V <$> varName
         <|> V <$> (namedToken "(" *> satisfy (\s -> unTok s `HS.member` (HS.fromList $ map symb infxLst)) <* namedToken ")")
 
-    stringR <- rule $ 
-            String <$> (namedToken "\"" *> satisfy (\s -> True) <* namedToken "\"")
-
+    nameR <- rule $ 
+            Name <$> (namedToken "\'" *> satisfy (\s -> True))
 
     atom <- rule $ varR
-        <|> stringR
+        <|> nameR
         <|> namedToken "(" *> expr <* namedToken ")"
     appR <- rule $ 
             atom 
@@ -503,14 +499,14 @@ expLang infxLst = mdo
         <|> (:|$|:) <$> appR <*> (namedToken "{" *> atom <* namedToken "}")
 
     arrR <- rule $
-            appR
-        <|> Pi <$> (namedToken "{" *> (Implicit (Ctxt S.empty) <$> name) <* namedToken ":") <*> (expr <* namedToken "}") <*> (namedToken "->" *> expr)
-        <|> Pi <$> (namedToken "(" *> (Named (Ctxt S.empty) <$> name) <* namedToken ":") <*> (expr <* namedToken ")") <*> (namedToken "->" *> expr)
-        -- <|> (Pi (Unnamed (Ctxt S.empty))) <$> (namedToken "(" *> expr <* namedToken ")") <*> (namedToken "->" *> expr)
-        <|> (Pi (Unnamed (Ctxt S.empty))) <$> appR <*> (namedToken "->" *> expr)
+            expr
+        <|> Pi <$> (namedToken "{" *> (Implicit <$> varName) <* namedToken ":") <*> (arrR <* namedToken "}") <*> (namedToken "->" *> arrR)
+        <|> Pi <$> (namedToken "(" *> (Named <$> varName) <* namedToken ":") <*> (arrR <* namedToken ")") <*> (namedToken "->" *> arrR)
+        <|> (Pi Synthesized) <$> (namedToken "[" *> arrR <* namedToken "]") <*> (namedToken "->" *> arrR)
+        <|> (Pi Unnamed) <$> expr <*> (namedToken "->" *> arrR)
          
-    expr <- mixfixExpression table arrR appFun
-    return expr
+    expr <- mixfixExpression table appR appFun
+    return arrR
     where
         appFun :: (Holey (Token Text) -> [Exp (Token Text)] -> Exp (Token Text))
         appFun [Nothing,Just t, Nothing] xs = foldl (:$:) (V t) xs
@@ -582,13 +578,15 @@ mkTerm vars (e :|$|: e') = do
     return $ case f of
         (LamPi.:@:) x xs -> (LamPi.:@:) x (xs ++ [LamPi.I f'])
         _              -> (LamPi.:@:) f [LamPi.I f']
-mkTerm vars (Pi (Unnamed _) e e') = (LamPi.Π) <$> mkTerm vars e <*> mkTerm ("":vars) e'
-mkTerm vars (Pi (Named _ (Token n _ _ _ _)) e e') = (LamPi.Π) <$> mkTerm vars e <*> mkTerm (n:vars) e'
-mkTerm vars (Pi (Implicit _ (Token n _ _ _ _)) e e') = (LamPi.IΠ) <$> mkTerm vars e <*> mkTerm (n:vars) e'
-mkTerm vars (String (Token s _ _ _ _)) = return $ LamPi.MkString $ s
+mkTerm vars (Pi Unnamed e e') = (LamPi.Π) <$> mkTerm vars e <*> mkTerm ("":vars) e'
+mkTerm vars (Pi Synthesized e e') = (LamPi.:⇒:) <$> mkTerm vars e <*> mkTerm vars e'
+mkTerm vars (Pi (Named (Token n _ _ _ _)) e e') = (LamPi.Π) <$> mkTerm vars e <*> mkTerm (n:vars) e'
+mkTerm vars (Pi (Implicit (Token n _ _ _ _)) e e') = (LamPi.IΠ) <$> mkTerm vars e <*> mkTerm (n:vars) e'
+mkTerm vars (Name (Token s _ _ _ _)) = return $ LamPi.MkName $ s
 mkTerm vars (V (Token "*" _ _ _ _)) = return LamPi.Star
 mkTerm vars (V (Token "Type" _ _ _ _)) = return LamPi.Star
-mkTerm vars (V (Token "String" _ _ _ _)) = return $ LamPi.String
+mkTerm vars (V (Token "Prop" _ _ _ _)) = return LamPi.Prop
+mkTerm vars (V (Token "Name" _ _ _ _)) = return $ LamPi.Name
 mkTerm vars (V (Token n _ _ _ _)) 
     | (Just i) <- elemIndex n vars = return $ LamPi.Bound i                           
     | otherwise = do
@@ -647,7 +645,7 @@ compileRaw s = do
             -- putStrLn $ show $ map unTok $ tokenize is $ toS s
             case parseG'' (tokenize start_loc is) (declLang is) $ toS s of
                 ([], Report{..}) -> fail $ mkError $ tokens !! position
-                ([x],_) -> dataToExpQ (const Nothing) $ map (declMap ((toS :: Text -> String) . unTok)) x
+                ([x],_) -> dataToExpQ (const Nothing) $ map (fmap ((toS :: Text -> String) . unTok)) x
                     -- putStrLn "\nParsed and pretty printed output:\n"
                     -- putStrLn $ pprint $ map (declMap unTok) x
                 (xs,_) -> fail $ "Ambiguous parse:\n" ++ (intercalate "\n" $ map pprint (xs :: [[Decl (Token Text)]]))
