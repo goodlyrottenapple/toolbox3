@@ -9,10 +9,12 @@ module Test where
 
 import Core
 
--- import LamPi
+import LamPi
 
-notation =  [t3|
-infix 2 ⊢
+import Control.Monad(foldM)
+
+test = [t3|
+infix 2 ⊢ , ∈ 
 infixr 3 → , >
 infixl 4 ∧, ∨, ;
 
@@ -22,51 +24,56 @@ infixl 4 ∧, ∨, ;
 -- data Set : * -> * where end
 
 data Nat : * where
-	Z : Nat |
+	0 : Nat |
 	S : Nat -> Nat
 end
 
-data Vec : Type -> Nat -> Type where
-	Nil : {a : *} -> Vec a Z |
-	Cons : {a : *} -> {n : Nat} -> (x : a) -> Vec a n -> Vec a (S n)
+data Vec : * -> Nat -> * where
+	Nil : {T : *} -> Vec T 0 |
+	Cons : {T : *} -> {n : Nat} -> (x : T) -> Vec T n -> Vec T (S n)
 end
 
 
-data Ty : * where
-	Fm : Ty
-  | Fnc : Ty
-  | Act : Ty
-  | Ag : Ty
+
+data Formula : Name -> * where
+	A : {n : Name} -> Name -> Formula n
+  | (∧) : Formula 'Fm -> Formula 'Fm -> Formula 'Fm
+  -- | (∨) : Formula Fm -> Formula Fm -> Formula Fm
+  -- | (→) : Formula Fm -> Formula Fm -> Formula Fm
+  | trZer : Formula 'Fnc -> Formula 'Fm -> Formula 'Fm
 end
 
 
-data Formula : Ty -> * where
-	A : String -> Formula Fm
-  | (∧) : Formula Fm -> Formula Fm -> Formula Fm
-  | (∨) : Formula Fm -> Formula Fm -> Formula Fm
-  | (→) : Formula Fm -> Formula Fm -> Formula Fm
-  | trZer : Formula Fnc -> Formula Fm -> Formula Fm
+data Structure : Name -> * where
+	F : {t : Name} -> Formula t -> Structure t
+  | (;) : Structure 'Fm -> Structure 'Fm -> Structure 'Fm
+--   | (>) : Structure Fm -> Structure Fm -> Structure Fm
+end
+
+data (⊢) : {t : Name} -> Structure t -> Structure t -> * where
+	Atom : {a : Name} -> {t : Name} -> F (A {t} a) ⊢ F (A a)
+ --  | CL : {X : Structure 'Fm} -> {Y : Structure 'Fm} -> 
+	-- 	X ; X ⊢ Y -> X ⊢ Y
+ --  | AndL : {A : Formula 'Fm} -> {B : Formula 'Fm} -> {X : Structure 'Fm} ->
+ --  		F A ; F B ⊢ X -> F (A ∧ B) ⊢ X
+ --  | AndR : {A : Formula 'Fm} -> {B : Formula 'Fm} -> {X : Structure 'Fm} -> {Y : Structure 'Fm} ->
+ --  		F A ⊢ X -> F B ⊢ Y -> 
+ --  		------------------
+ --  		X ; Y ⊢ F (A ∧ B)
 end
 
 
-data Structure : Ty -> * where
-	F : {t : Ty} -> Formula t -> Structure t
-  | (;) : Structure Fm -> Structure Fm -> Structure Fm
-  | (>) : Structure Fm -> Structure Fm -> Structure Fm
+data Set : * -> * where end
+data (∈) : {a : Type} -> a -> Set a -> Prop where end
+
+data Fml : Set Name -> * where
+	base : {X : Set Name} -> Fml X
+  | all : (x : Name) -> {X : Set Name} -> [ x ∈ X ] -> Fml X -> {Y : Set Name} -> [ x ∈ X ] -> Fml Y
 end
 
-data (⊢) : {t : Ty} -> Structure t -> Structure t -> * where
-	Atom : {s : String} -> (⊢) {Fm} (F {Fm} (A s)) (F {Fm} (A s))
-  | CL : {X : Structure Fm} -> {Y : Structure Fm} -> 
-		(⊢) {Fm} (X ; X) Y -> (⊢) {Fm} X Y
-  | AndL : {A : Formula Fm} -> {B : Formula Fm} -> {X : Structure Fm} ->
-  		(⊢) {Fm} (F {Fm} A ; F {Fm} B) X -> (⊢) {Fm} (F {Fm} (A ∧ B)) X
-
-  | AndR : {A : Formula Fm} -> {B : Formula Fm} -> {X : Structure Fm} -> {Y : Structure Fm} ->
-  		(⊢) {Fm} (F {Fm} A) X -> (⊢) {Fm} (F {Fm} B) Y -> (⊢) {Fm} (X ; Y) (F {Fm} (A ∧ B)) 
-
--- X |- A    Y |- B
--- ---------------- andR ("\land_R")
--- X , Y |- A /\ B
-end
 |]
+
+(Right g) = runSTE $ foldM defineDecl (Γ []) test
+
+
+-- runElabType0 g $ C "all" :@: [E $ MkName "x",  E $ C "base"]

@@ -595,7 +595,7 @@ mkTerm vars (V (Token n _ _ _ _))
         return $ LamPi.Free $ LamPi.Global n
 
 mkTerm0 :: MonadError String m => LamPi.Γ -> Exp (Token Text) -> m LamPi.Term
-mkTerm0 g e = flip evalStateT (foldr (\(n,_) xs -> case n of 
+mkTerm0 (LamPi.Γ g) e = flip evalStateT (foldr (\(n,_) xs -> case n of 
     LamPi.Global x -> x:xs 
     _ -> xs) [] g) (mkTerm [] e)
 

@@ -35,6 +35,25 @@ instance SMTTypeable Integer where
         return $ -ival
     fromSExpr _ = Nothing
 
+
+instance SMTTypeable String where
+    ty = SExprT $ SimpleSMT.const "String"
+
+    declareSExpr n = SExprT $ fun "declare-fun" [ Atom n, List [], Atom "String" ]
+    defineSExpr s = SExprT $ Atom ('"':s ++ "\"")
+
+    fromValue (Other s) = fromSExpr s
+    fromValue _ = Nothing
+
+    fromSExpr (Atom s) = Just $ removeQuotes s
+        where
+            removeQuotes [] = []
+            removeQuotes ('"':xs) = removeQuotes xs
+            removeQuotes (x:xs) = x:removeQuotes xs
+    fromSExpr _ = Nothing
+
+
+
 instance (Ord a , SMTTypeable a) => SMTTypeable (Set a) where
     ty :: forall a. (Ord a, SMTTypeable a) => SExprT (Set a)
     ty = SExprT $ fun "Set" [unwrap $ ty @a]
@@ -63,15 +82,6 @@ instance (Ord a , SMTTypeable a) => SMTTypeable (Set a) where
         ys' <- fromSExpr ys
         return $ S.union xs' ys'
     fromSExpr _ = Nothing
-
-
-
-declare :: forall a m. (SMTTypeable a, MonadIO m, MonadReader Solver m) => String -> m (SExprT a)
-declare n = do
-    proc <- ask
-    liftIO $ ackCommand proc $ unwrap $ declareSExpr @a n
-    return (SExprT $ SimpleSMT.const n)
-
 
 not :: SExprT Bool -> SExprT Bool
 not p = SExprT $ fun "not" [unwrap p]
@@ -174,6 +184,18 @@ define :: forall a m. (SMTTypeable a, MonadIO m, MonadReader Solver m) => SExprT
 define var a = assert (eq var (defineSExpr a))
 
 
+declare :: forall a m. (SMTTypeable a, MonadIO m, MonadReader Solver m) => String -> Maybe a -> m (SExprT a)
+declare n v = do
+    proc <- ask
+    liftIO $ ackCommand proc $ unwrap $ declareSExpr @a n
+    let nexp = SExprT $ SimpleSMT.const n
+    case v of 
+        Just val -> define nexp val
+        Nothing -> return ()
+    return (SExprT $ SimpleSMT.const n)
+
+
+
 check :: (MonadIO m, MonadReader Solver m) => m SimpleSMT.Result
 check = do
     proc <- ask
@@ -187,11 +209,11 @@ getExpr a = do
     return $ fromValue v
 
 
-runCVC4 :: ReaderT Solver IO a -> IO ()
-runCVC4 m = do
+runCVC4 :: String -> ReaderT Solver IO a -> IO ()
+runCVC4 logic m = do
     log <- SimpleSMT.newLogger 0
     smt <- SimpleSMT.newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (Just log)
-    SimpleSMT.setLogic smt "QF_UFLIAFS"
+    SimpleSMT.setLogic smt logic -- "QF_UFLIAFS"
 
     runReaderT m smt
 
