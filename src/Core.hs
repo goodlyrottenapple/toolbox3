@@ -566,6 +566,9 @@ declLang infxLst = mdo
 type Constants = [Text]
 
 mkTerm :: (MonadError String m, MonadState Constants m) => [Text] -> Exp (Token Text) -> m LamPi.Term
+mkTerm vars (V (Token "Set" _ _ _ _) :$: e') = do
+    f' <- mkTerm vars e'
+    return $ LamPi.Set f'
 mkTerm vars (e :$: e') = do
     f <- mkTerm vars e
     f' <- mkTerm vars e'
