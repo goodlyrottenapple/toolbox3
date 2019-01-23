@@ -31,8 +31,9 @@ import qualified SimpleSMT
 -- import SMT
 infixl 7 :@:
 
+debugMode = False
 
-debug = flip trace
+debug = if debugMode then flip trace else (\a _ -> a)
 
 data ExplImpl a = I a | E a deriving (Show, Eq, Ord, Data, Functor)
 
@@ -86,7 +87,7 @@ instance Show Term where
     show Name = "Name"
     show (MkName s) = "\'" ++ toS s
     show (Set a) = "Set " ++ show a
-    show (MkSet _ s) = "{" ++ (intercalate "," (map show s)) ++ "}"
+    show (MkSet _ s) = "⦃" ++ (intercalate "," (map show s)) ++ "⦄"
     show (Π t t') = "Π " ++ show t ++ " . " ++ show t'
     show (IΠ t t') = "Π {" ++ show t ++ "} . " ++ show t'
     show (t :⇒: t') = "[" ++ show t ++ "] -> " ++ show t'
@@ -471,7 +472,7 @@ mkMap ((M x, M y):xs) = let xs' = mkMap xs in
     case (M.lookup x xs', M.lookup y xs') of
         (Just xm, Nothing) -> M.insert y xm xs'
         (Nothing, Just ym) -> M.insert x ym xs'
-        (Just xm, Just ym) -> xs' `debug` ("this shouldnt happen")
+        (Just xm, Just ym) -> error "this shouldn't happen"
         (Nothing, Nothing) -> M.insert x (M y) xs'
 mkMap ((M x, y):xs) = M.insert x y $ mkMap xs
 mkMap ((x, M y):xs) = mkMap $ (M y, x):xs
@@ -516,9 +517,13 @@ toSExpr (M x) = SimpleSMT.const $ "M" ++ show x
 toSExpr (C "∈" :@: [_, E x, E s]) = SimpleSMT.fun "member" [toSExpr x, toSExpr s]
 toSExpr (C "\\\\" :@: [_, E s, E x]) = SimpleSMT.fun "setminus" [toSExpr s, SimpleSMT.fun "singleton" [toSExpr x]]
 toSExpr (C "≡" :@: [_, E x, E y]) = SimpleSMT.eq (toSExpr x) (toSExpr y)
+toSExpr (C "∪" :@: [_, E x, E y]) = SimpleSMT.fun "union" [toSExpr x, toSExpr y]
+toSExpr (C "∩" :@: [_, E x, E y]) = SimpleSMT.fun "intersection" [toSExpr x, toSExpr y]
+toSExpr (C "\\" :@: [_, E x, E y]) = SimpleSMT.fun "setminus" [toSExpr x, toSExpr y]
+toSExpr (C "singleton" :@: [_, E x]) = SimpleSMT.fun "singleton" [toSExpr x]
 toSExpr _ = error "unsupported operation"
 
-
+ 
 
 fromSExpr :: SimpleSMT.SExpr -> Type -> Term
 fromSExpr (SimpleSMT.Atom xs) VName = MkName $ toS $ filter (/= '"') xs
@@ -584,29 +589,38 @@ elabType0 t = do
             (SATDefs defined) <- getHas
             forM_ (S.toList defined) (\d -> do
                 (SimpleSMT.Other v) <- liftIO $ SimpleSMT.getExpr proc (SimpleSMT.const $ "M" ++ show d)
-                τ <- lookupInΓ (Meta d)
-                let vt = fromSExpr v τ
-                liftIO $ putStrLn $ "\n\nadding const: " ++ show (M d,vt)
-                addToConstrList $ ConstrList [(M d,vt)])
+                τ <- lookupInΓ (Meta d) `debug` ("\n\nSMT returned: " ++ show v)
+                let vt = fromSExpr v τ 
+                addToConstrList $ ConstrList [(M d,vt)] `debug` ("\n\nadding const: " ++ show (M d,vt)))
         _ -> throwError $ "collected constraints: " ++ show satcs' ++ " are not satisfiable!"
     -- get model and add to cs
 
     liftIO $ SimpleSMT.stop proc
-    (ConstrList cs) <- getConstrList
-    σ <- unifyConstraints cs [] False M.empty `debug` ("\n\nelabType0 constraints: " ++ show cs ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
+    (ConstrList cs') <- getConstrList `debug` "stopped SMT"
+    σ <- unifyConstraints cs' [] False M.empty `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
     let trm' = substMetas σ trm
         typ' = substMetas σ $ quote0 typ
     unless (doesNotContainMetas trm')$ throwError $ show trm' ++ " contains metas! (elabType0)"
     unless (doesNotContainMetas typ')$ throwError $ show typ' ++ " contains metas! (elabType0)"
-    return $ (trm', eval typ' [])
+    return $ (trm', eval typ' []) `debug` ("cs now contains: " ++ show cs')
 
 runElabType0 :: Γ -> Term -> IO (Either String (Term, Type))
 runElabType0 g t = do
     log <- SimpleSMT.newLogger 0
-    smt <- SimpleSMT.newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (Just log)
+    smt <- SimpleSMT.newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (if debugMode then Just log else Nothing)
     SimpleSMT.setLogic smt "QF_UFSLIAFS" -- "QF_UFLIAFS"
 
     runExceptT $ (flip (evalStateT @(ExceptT String IO)) (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt)) $ elabType0 t
+
+
+runElabType0' :: (MonadIO m, MonadError String m) => Γ -> Term -> m (Term, Type)
+runElabType0' g t = do
+    log <- liftIO $ SimpleSMT.newLogger 0
+    smt <- liftIO $ SimpleSMT.newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (if debugMode then Just log else Nothing)
+    liftIO $ SimpleSMT.setLogic smt "QF_UFSLIAFS" -- "QF_UFLIAFS"
+
+    (flip (evalStateT ) (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt)) $ elabType0 t
+
 
 
 
@@ -629,9 +643,9 @@ evalTypeOf0 g t τ = flip evalStateT (BVCounter 0,MetaCounter 0,g,ConstrList [],
 
 
 data Decl = 
-    Data Text Term [(Text, Term)]  deriving (Show, Eq, Data)
-  -- | Def name (Type name) [PClause name]
-
+    Data Text Term [(Text, Term)]  
+  | Def Text Term
+    deriving (Show, Eq, Data)
 
 codom :: Term -> Term
 codom (Π _ ρ) = codom ρ
@@ -667,7 +681,7 @@ codom x = x
 -- strictPositivityCheck mustBeAppC c _ = return ()
 
 
-defineDecl :: MonadError String m => Bool -> Γ -> Decl -> m Γ 
+defineDecl :: (MonadIO m, MonadError String m) => Bool -> Γ -> Decl -> m Γ 
 defineDecl ignoreCodom env@(Γ g) (Data n t xs) = do
     case lookup (Global n) g of
         Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
@@ -677,6 +691,17 @@ defineDecl ignoreCodom env@(Γ g) (Data n t xs) = do
             if ignoreCodom then pure () else unless (codom t == Star || codom t == Prop) $ throwError $ toS n ++ " data declaration should have type ... -> */Prop"
             (Γ g') <- defineTyCon (Γ $ (Global n,τ):g) n xs
             return $ Γ $ g' ++ ((Global n,τ):g)
+
+defineDecl _ env@(Γ g) (Def n trm) = do
+    case lookup (Global n) g of
+        Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
+        Nothing -> do
+            (t', τ) <- runElabType0' env trm
+            liftIO $ putStrLn $ "-------------------------------------------\n" ++
+                                "Successfully elaborated\n" ++ show t' ++ " : " ++ show τ ++
+                                "\n-------------------------------------------"
+            return $ env
+
 
 defineTyCon :: MonadError String m => Γ -> Text -> [(Text, Term)] -> m Γ 
 defineTyCon _ _ [] = return $ Γ []

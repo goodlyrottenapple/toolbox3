@@ -72,6 +72,7 @@ data Exp name where
     (:$:) :: Exp name -> Exp name -> Exp name -- e e
     (:|$|:) :: Exp name -> Exp name -> Exp name -- e e
     Pi :: Arg name -> Exp name -> Exp name -> Exp name
+    Set :: [Exp name] -> Exp name
     deriving (Show, Eq, Ord, Generic, Data, Typeable, Functor)
 
 
@@ -96,7 +97,7 @@ data TyCon name = TyCon name (Exp name) (Binding name) -- Just (n,t) is: bind n 
 
 data Decl name = 
     Data name (Exp name) [TyCon name] 
-  -- | Def name (Exp name) [PClause name]
+  | Def name (Exp name) -- [PClause name]
 
   deriving (Show, Eq, Data, Typeable, Functor)
 
@@ -117,6 +118,7 @@ class PPrint a where
 instance PPrint name => PPrint (Exp name) where
     pprint (V name) = pprint name
     pprint (Name s) = "\'" ++ pprint s
+    pprint (Set xs) = "⦃" ++ (intercalate "," (map pprint xs)) ++ "⦄"
     pprint (e :$: (e' :$: f'))     = pprint e ++ " (" ++ pprint (e' :$: f') ++ ")"
     pprint (e :$: f)              = pprint e ++ " " ++ pprint f
     pprint (e :|$|: f)              = pprint e ++ " {" ++ pprint f ++"}"
@@ -475,7 +477,7 @@ infixLang = mdo
     return expr
 
 reservedKeywords :: [Text]
-reservedKeywords = ["\"", "(", ")", "{", "}", "[", "]", "=>", "->", ":", ",", "\'", "data", "def", "end", "where", "bind", "|", "infix", "infixl", "infixr"] 
+reservedKeywords = ["\"", "(", ")", "{", "}", "{|", "|}", "[", "]", "=>", "->", ":", ",", "\'", "data", "def", "end", "where", "bind", "|", "infix", "infixl", "infixr"] 
 
 bracketed :: (Eq b, IsString b) => Prod r b b a -> Prod r b b a
 bracketed x = namedToken "(" *> x <* namedToken ")"
@@ -490,9 +492,16 @@ expLang infxLst = mdo
     nameR <- rule $ 
             Name <$> (namedToken "\'" *> satisfy (\s -> True))
 
+    listR <- rule $ 
+            pure []
+        <|> (:) <$> (arrR <* namedToken ",") <*> listR
+
+    setR <- rule $ Set <$> (namedToken "{|" *> listR <* namedToken "|}")
+
     atom <- rule $ varR
         <|> nameR
         <|> namedToken "(" *> expr <* namedToken ")"
+        <|> setR
     appR <- rule $ 
             atom 
         <|> (:$:) <$> appR <*> atom -- (e .. e) (e) / A (e)
@@ -540,6 +549,10 @@ declLang infxLst = mdo
     dataR <- rule $ 
         Data <$> (namedToken "data" *> name <* namedToken ":") <*> 
             expR <*> (namedToken "where" *> tyConR <* namedToken "end")
+
+    defR <- rule $ 
+        Def <$> (namedToken "def" *> name <* namedToken "=") <*> 
+            (expR <* namedToken "end")
     -- declR
 
     -- clauseExpR <- rule $ ((V <$> var (HS.fromList reservedKeywords)) <|> bracketed expR)
@@ -561,7 +574,7 @@ declLang infxLst = mdo
     --         argsR <*> (namedToken "where" *> pClauseListR <* namedToken "end")
 
 
-    return $ many dataR -- <|> defR)
+    return $ many (dataR <|> defR)
 
 type Constants = [Text]
 
@@ -569,6 +582,7 @@ mkTerm :: (MonadError String m, MonadState Constants m) => [Text] -> Exp (Token 
 mkTerm vars (V (Token "Set" _ _ _ _) :$: e') = do
     f' <- mkTerm vars e'
     return $ LamPi.Set f'
+-- mkTerm vars (Set xs) = return $ LamPi.MkSet _ (mkTerm vars xs) <- need a mechanism for hole here!!
 mkTerm vars (e :$: e') = do
     f <- mkTerm vars e
     f' <- mkTerm vars e'
@@ -618,6 +632,11 @@ makeDecl (Data (Token n _ _ _ _) t cs:xs) = do
             e' <- mkTerm [] e
             modify (n:)
             return (n, e')
+makeDecl (Def (Token n _ _ _ _) trm:xs) = do
+    trm' <- mkTerm [] trm
+    xs' <- makeDecl xs
+    return $ LamPi.Def n trm':xs'
+
 
 
 runSTE :: StateT Constants (Except String) v -> Either String v
