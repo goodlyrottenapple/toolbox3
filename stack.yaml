@@ -38,7 +38,9 @@ packages:
 # using the same syntax as the packages field.
 # (e.g., acme-missiles-0.3)
 extra-deps: [
-  simple-smt-0.9.3 # @sha256:3cdd832f1f11113436ed7806b8c2bfe6a14017aeefe85eac25fc45844e824d1c
+    simple-smt-0.9.3 # @sha256:3cdd832f1f11113436ed7806b8c2bfe6a14017aeefe85eac25fc45844e824d1c
+  , haskell-lsp-0.8.0.1 # @sha256:895273c99324fbab2432c2ce0d853d1a4381c3c86755e29f8437802d209f1d29
+  , haskell-lsp-types-0.8.0.1
 ]
 
 # Override default flag values for local packages and extra-deps
