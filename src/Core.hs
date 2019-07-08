@@ -78,8 +78,6 @@ data Exp name where
     InferMeta :: Exp name
     deriving (Show, Eq, Ord, Generic, Data, Typeable, Functor)
 
-
-
 data Binding n = Bind n n | Unbound deriving (Show, Eq, Functor, Generic, Data, Typeable)
 
 
@@ -101,8 +99,13 @@ data TyCon name = TyCon name (Exp name) (Binding name) -- Just (n,t) is: bind n 
 data Decl name = 
     Data name (Exp name) [TyCon name] 
   | Def name (Maybe (Exp name)) (Maybe name) (Exp name) -- [PClause name]
+  | PropDef name (Exp name) (LamPi.SExpr name name)
+  deriving (Show, Eq, Data, Typeable)
 
-  deriving (Show, Eq, Data, Typeable, Functor)
+instance Functor Decl where
+    fmap f (Data n e tys) = Data (f n) (fmap f e) (map (fmap f) tys) 
+    fmap f (Def n x y z) = Def (f n) (fmap (fmap f) x) (fmap f y) (fmap f z)
+    fmap f (PropDef n exp sexp) = PropDef (f n) (fmap f exp) (bimap f f sexp)
 
 -- pattern ENArr x = ExplicitNamedArr x
 -- pattern EArr    = ExplicitArr
@@ -164,6 +167,11 @@ instance PPrint name => PPrint (TyCon name) where
 --                 _ -> pprint x) epats
 
 
+instance (PPrint name, PPrint name2) => PPrint (LamPi.SExpr name name2) where
+    pprint (LamPi.NAtom n) = "'" ++ pprint n
+    pprint (LamPi.VAtom n) = pprint n
+    pprint (LamPi.List xs) = "(" ++ (intercalate " " $ map pprint xs) ++ ")"
+
 instance PPrint name => PPrint (Decl name) where
     pprint (Data n t tys) = "data " ++ pprint n ++ " : " ++ pprint t ++ " where\n" ++
         (intercalate " |\n" $ map ((" " ++) . pprint) tys) ++"\nend"
@@ -171,6 +179,9 @@ instance PPrint name => PPrint (Decl name) where
     pprint (Def n (Just t) _ e) = 
         "def " ++ pprint n ++ " : " ++ pprint t ++ " where\n    " ++
                   pprint n ++ " = " ++ pprint t ++ "end"
+    pprint (PropDef n t sexp) = 
+        "prop " ++ pprint n ++ " : " ++ pprint t ++ " where\n    " ++
+                  pprint sexp ++ "\nend"
     -- pprint (Def n t patts) = "def " ++ pprint n ++ " : " ++ pprint t ++ " where\n" ++
     --     (intercalate " |\n" $ map ((" " ++) . pprint) patts) ++"\nend"
 
@@ -390,6 +401,7 @@ ignoreComment2 = blockDrop "{-" "-}"
 
 ignoreData = blockDrop "data" "end"
 ignoreDef = blockDrop "def" "end"
+ignoreProp = blockDrop "prop" "end"
 ignoreInfixl = blockDrop "infixl" "\n"
 ignoreInfixr = blockDrop "infixr" "\n"
 ignoreInfix = blockDrop "infix" "\n"
@@ -408,7 +420,7 @@ pretokenize start_loc =
     flip evalState start_loc . 
     tokenizer (
         whitespace : newline : tab : 
-        ignoreData : ignoreDef : ignoreComment : ignoreComment2 :
+        ignoreData : ignoreDef : ignoreProp : ignoreComment : ignoreComment2 :
         (map reservedKeyword $ sortBy longestFirst reservedKeywords))
 
 
@@ -490,7 +502,7 @@ infixLang = mdo
     return expr
 
 reservedKeywords :: [Text]
-reservedKeywords = ["\"", "(", ")", "{", "}", "{|", "|}", "[", "]", "=>", "->", ":", ",", "\'", "?", "_", "data", "def", "end", "where", "bind", "|", "infix", "infixl", "infixr"] 
+reservedKeywords = ["\"", "(", ")", "{", "}", "{|", "|}", "[", "]", "=>", "->", ":", ",", "\'", "?", "_", "data", "def", "prop", "end", "where", "bind", "|", "infix", "infixl", "infixr"] 
 
 bracketed :: (Eq b, IsString b) => Prod r b b a -> Prod r b b a
 bracketed x = namedToken "(" *> x <* namedToken ")"
@@ -532,7 +544,8 @@ expLang infxLst = mdo
         <|> Pi <$> (namedToken "(" *> (Named <$> varName) <* namedToken ":") <*> (arrR <* namedToken ")") <*> (namedToken "->" *> arrR)
         <|> (Pi Synthesized) <$> (namedToken "[" *> arrR <* namedToken "]") <*> (namedToken "->" *> arrR)
         <|> (Pi Unnamed) <$> expr <*> (namedToken "->" *> arrR)
-         
+        <|> (Pi Unnamed) <$> (namedToken "(" *> arrR <* namedToken ")") <*> (namedToken "->" *> arrR)
+    
     expr <- mixfixExpression table appR appFun
     return arrR
     where
@@ -549,6 +562,28 @@ expLang infxLst = mdo
 
                 infixToHoley :: Infix -> (Holey (Prod r (Token Text) (Token Text) (Token Text)), Associativity)
                 infixToHoley Infix{..} = ([Nothing, Just $ namedToken $ tok symb, Nothing],assoc)
+
+
+sExpLang :: [Infix] -> G (LamPi.SExpr (Token Text) (Token Text))
+sExpLang infxLst = mdo
+    varR <- rule $ LamPi.VAtom <$> var (HS.fromList $ reservedKeywords ++ map symb infxLst)
+
+    nameR <- rule $ 
+            LamPi.NAtom <$> (namedToken "\'" *> satisfy (\s -> True))
+
+    listRAux <- rule $ (:[]) <$> varR
+        <|> (:[]) <$> nameR
+        <|> (:[]) <$> listR
+        <|> (:) <$> atom <*> listRAux
+        -- <|> (:) <$> nameR <*> listRAux
+        -- <|> (:) <$> (namedToken "(" *> listR <* namedToken ")") <*> listRAux
+
+    listR <- rule $ LamPi.List <$> (namedToken "(" *> listRAux <* namedToken ")")
+
+    atom <- rule $ varR <|> nameR <|> listR
+        
+    return atom
+    
 declLang :: [Infix] -> G [Decl (Token Text)]
 declLang infxLst = mdo
     name  <- rule $ 
@@ -577,6 +612,11 @@ declLang infxLst = mdo
             ((Just <$> expR) <* namedToken "where") <*>
             ((Just <$> name) <* namedToken "=") <*>
             (expR <* namedToken "end")
+
+    sExpR <- sExpLang infxLst
+    propR <- rule $
+        PropDef <$> (namedToken "prop" *> name <* namedToken ":") <*> 
+            expR <*> (namedToken "where" *> sExpR <* namedToken "end")
     -- declR
 
     -- clauseExpR <- rule $ ((V <$> var (HS.fromList reservedKeywords)) <|> bracketed expR)
@@ -598,7 +638,7 @@ declLang infxLst = mdo
     --         argsR <*> (namedToken "where" *> pClauseListR <* namedToken "end")
 
 
-    return $ many (dataR <|> defR)
+    return $ many (dataR <|> defR <|> propR)
 
 newtype Constants = Constants { unConstants :: [Text] } deriving (Eq, Show)
 newtype HoleCount = HoleCount { unHoleCount :: Int } deriving (Eq, Show)
@@ -654,6 +694,15 @@ mkTerm vars (V (Token n _ _ _ _))
         unless (n `elem` constants) $ throwError $ "Variable " ++ toS n ++ " not declared!"
         return $ LamPi.Free $ LamPi.Global n
 
+
+
+getVars :: [Text] -> Exp (Token Text) -> [Text]
+getVars vars (Pi Unnamed _ e') = getVars ("":vars) e'
+getVars vars (Pi (Named (Token n _ _ _ _)) e e') = getVars (n:vars) e'
+getVars vars (Pi (Implicit (Token n _ _ _ _)) e e') = getVars (n:vars) e'
+getVars vars x = vars
+
+
 -- mkTerm0 :: MonadError String m => LamPi.Γ -> Exp (Token Text) -> m LamPi.Term
 -- mkTerm0 (LamPi.Γ g) e = flip evalStateT (Constants $ foldr (\(n,_) xs -> case n of 
 --     LamPi.Global x -> x:xs 
@@ -685,7 +734,22 @@ makeDecl (Def (Token n _ _ _ _) (Just ty) (Just (Token n' _ _ _ _)) trm:xs) | n 
     xs' <- makeDecl xs
     return $ LamPi.Def n (Just ty') trm':xs'
 makeDecl (Def (Token n _ _ _ _) (Just ty) (Just (Token n' _ _ _ _)) trm:xs) | otherwise = error $ "name of function does not correspond to the definition"
+makeDecl (PropDef (Token n _ _ _ _) t sexp:xs) = do
+    t' <- mkTerm [] t
+    let vars = reverse $ getVars [] t
+    modify (\s -> modifier (\(Constants xs) -> Constants $ n:xs) s)
+    xs' <- makeDecl xs
+    sexp' <- setVars vars (bimap unTok unTok sexp)
+    return $ LamPi.PropDef n t' sexp':xs'
 
+    where
+        setVars vars (LamPi.NAtom n) = return $ LamPi.NAtom n
+        setVars vars (LamPi.VAtom n)
+            | (Just i) <- elemIndex n vars = return $ LamPi.VAtom i                           
+            | otherwise = throwError $ "Variable " ++ toS n ++ " not declared!"
+        setVars vars (LamPi.List xs) = do
+            xs' <- mapM (setVars vars) xs
+            return $ LamPi.List xs'
 
 runSTE :: StateT (HoleCount, Constants) (Except String) v -> Either String v
 runSTE m = runExcept (flip evalStateT (HoleCount 0, Constants []) m)

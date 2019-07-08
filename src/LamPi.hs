@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings, DeriveDataTypeable, FlexibleContexts, 
-PatternSynonyms, DeriveFunctor, ScopedTypeVariables, TypeApplications #-}
+PatternSynonyms, DeriveFunctor, ScopedTypeVariables, TypeApplications,
+StandaloneDeriving #-}
 
 
 module LamPi where
@@ -11,6 +12,7 @@ import Data.String.Conv(toS)
 
 import Data.Data(Data)
 import Data.Has
+import Data.Bifunctor
 
 import Control.Monad.Except
 import Control.Monad.State
@@ -93,7 +95,7 @@ instance Show Term where
     show Name = "Name"
     show (MkName s) = "\'" ++ toS s
     show (Set a) = "Set " ++ show a
-    show (MkSet _ s) = "⦃" ++ (intercalate "," (S.toList (S.fromList (map show s)))) ++ "⦄"
+    show (MkSet a s) = "(⦃" ++ (intercalate "," (S.toList (S.fromList (map show s)))) ++ "⦄ : " ++ "Set " ++ show a ++ ")"
     show (Π t t') = "Π " ++ show t ++ " . " ++ show t'
     show (IΠ t t') = "Π {" ++ show t ++ "} . " ++ show t'
     show (t :⇒: t') = "[" ++ show t ++ "] -> " ++ show t'
@@ -138,7 +140,18 @@ data Neutral = NFree Name
              -- | NHole Value
 
 type Type = Value
-newtype Γ = Γ { unΓ :: [(Name, Type)] } deriving Show
+-- newtype Γ = Γ { unΓ :: [(Name, Type)] } deriving Show
+
+data Γ = Γ { 
+    types :: Map Name Type
+  , props :: Map Text (SExpr Text Int)
+ } 
+
+instance Show Γ where
+    show (Γ ts ps) = "Types:\n" ++ 
+        (intercalate "\n" $ map (\(n,t) -> show n ++ " -> " ++ show t) $ M.toList ts) ++
+        "\nDefined Props:\n" ++
+        (intercalate "," $ map (\(n,_) -> show n) $ M.toList ps)
 
 
 type Env = [Value]
@@ -254,14 +267,19 @@ getFreshAndIncrementBV = do
     return $ unBVCounter $ getter s
 
 addToΓ :: (Has Γ s, MonadState s m) => Name -> Type -> m ()
-addToΓ n τ = modify (\s -> modifier (\(Γ g) -> Γ $ (n, τ):g) s)
+addToΓ n τ = modify (\s -> modifier (\(Γ ts ps) -> Γ (M.insert n τ ts) ps ) s)
 
 lookupInΓ :: (Has Γ s, MonadState s m , MonadError String m) => Name -> m Type
 lookupInΓ n = do
     s <- get
-    case lookup n (unΓ $ getter s) of
+    case M.lookup n (types $ getter s) of
         Just τ -> return τ
         Nothing -> throwError ("unknown identifier: " ++ show n)
+
+getSExprMap :: (Has Γ s, MonadState s m) => m (Map Text (SExpr Text Int))
+getSExprMap = do
+    (Γ _ s) <- getter <$> get
+    return s
 
 getConstrList :: (Has ConstrList s, MonadState s m) => m ConstrList
 getConstrList = getter <$> get
@@ -300,12 +318,16 @@ elabType (Set α) = do
     α' <- typeOf α VStar
     return (Set α', VStar)
 elabType (MkSet α []) = do
-    let α' = eval α []
-    return $ (MkSet α [], VSet α')
+    α' <- typeOf α VStar
+    let α'' = eval α' [] `debug` ("{| |} : " ++ (show $ eval α' []))
+    return $ (MkSet α' [], VSet α'')
 elabType (MkSet α xs) = do
-    let α' = eval α [ ]
-    xs' <- mapM (flip typeOf α') xs
-    return (MkSet α xs', VSet α')
+    -- let α' = eval α [ ]
+    α' <- typeOf α VStar
+    let α'' = eval α' []
+    xs' <- mapM (flip typeOf α'') xs
+    pure ()  `debug` (show xs' ++ " : " ++ show α'')
+    return (MkSet α' xs', VSet α'')
 elabType (Π ρ ρ') = do
     τ <- typeOf ρ VStar
     i <- getFreshAndIncrementBV
@@ -322,7 +344,7 @@ elabType (Π ρ ρ') = do
 
     τ' <- typeOf (subst 0 (Free (Local i)) ρ') VStar
     (ConstrList cs) <- getConstrList
-    σ <- unifyConstraints cs [] False M.empty -- `debug` ("\n\ncs1 (elabType Π): " ++ show cs)
+    σ <- unifyConstraintsFull cs [] False M.empty -- `debug` ("\n\ncs1 (elabType Π): " ++ show cs)
     let τ'' = substMetas σ τ'
     checkDoesNotContainMetas "here??" τ''
 
@@ -335,7 +357,7 @@ elabType (x :⇒: y) = do
     x' <- typeOf x VProp 
     y' <- typeOf y VStar 
     (ConstrList cs) <- getConstrList
-    σ <- unifyConstraints cs [] False M.empty -- `debug` ("\n\nconstraints: " ++ show cs)
+    σ <- unifyConstraintsFull cs [] False M.empty -- `debug` ("\n\nconstraints: " ++ show cs)
     let x'' = substMetas σ x'
     let y'' = substMetas σ y'
     checkDoesNotContainMetas "here1" y'' `debug` ("\n\n:⇒: " ++ show x')
@@ -350,7 +372,7 @@ elabType InferM = do
     let mvar = Free (Meta mi)
 
     mj <- getFreshAndIncrementMeta
-    let mvarTy = eval (Free (Meta mj)) [] `debug` ("added " ++ show mi ++ "," ++ show mj)
+    let mvarTy = eval (Free (Meta mj)) [] `debug` ("InferM -> added " ++ show mi ++ "," ++ show mj)
     addToΓ (Meta mi) mvarTy
     return (mvar, mvarTy)
 elabType (Free n) = do
@@ -377,9 +399,11 @@ elabTypeApp ty [] = case ty of
     (VΠ _ _) -> throwError $ "illegal application at " <> (toS $ show ty)
     (VSArr cnstr τ') -> do
         cnstr' <- typeOf (quote0 cnstr) VProp
-        (ConstrList cs) <- getConstrList
+        (ConstrList cs) <- getConstrList 
+        pure () `debug` ("\n\nConstrList is: "++ show cs)
+        -- σ <- unifyConstraints cs [] False M.empty
         let cnstr'' = substMetas (mkMap cs) cnstr'
-        addToSATConstrList $ SATConstrList [cnstr''] `debug` ("\n\nConstrList is: "++ show cs)
+        addToSATConstrList $ SATConstrList [cnstr''] -- `debug` ("\nmap is: " ++ show σ)
         elabTypeApp τ' [] `debug` ("\n\nconstraint is: "++ show cnstr'')
     _ -> return ([], ty)
 elabTypeApp ty (x:xs) = case (x,ty) of
@@ -401,9 +425,11 @@ elabTypeApp ty (x:xs) = case (x,ty) of
         return $ (I mvar:xs',τ'')
     (_, VSArr cnstr τ') -> do
         cnstr' <- typeOf (quote0 cnstr) VProp
-        (ConstrList cs) <- getConstrList
-        let cnstr'' = substMetas (mkMap cs) cnstr'
-        addToSATConstrList $ SATConstrList [cnstr'']
+        (ConstrList cs) <- getConstrList 
+        pure () `debug` ("\n\nConstrList is: "++ show cs)
+        -- σ <- unifyConstraints cs [] False M.empty
+        let cnstr'' = substMetas (mkMap cs) cnstr' -- substMetas σ cnstr'
+        addToSATConstrList $ SATConstrList [cnstr''] -- `debug` ("\nmap is: " ++ show σ)
         elabTypeApp τ' (x:xs) `debug` ("\n\nconstraint is: "++ show cnstr'')
     _ -> throwError $ "illegal application at " <> (toS $ show x) <> " : " <> (toS $ show ty)
 
@@ -413,7 +439,7 @@ typeOf :: (Has BVCounter s, Has MetaCounter s, Has Γ s, Has ConstrList s, Has S
     MonadState s m , Has SMTSolver s, MonadIO m, MonadError String m) => 
     Term -> Type -> m Term
 typeOf e τ = do
-    cs <- getConstrList -- `debug` ("calling tyOf on " ++ show e ++ " : " ++ show τ)
+    cs <- getConstrList `debug` ("calling tyOf on " ++ show e ++ " : " ++ show τ)
     (e',τ') <- elabType e
     pure () `debug` ("elaborated " ++ show e ++ " : " ++ show τ ++ " to " ++ show e' ++ " : " ++ show τ')
     case τ' of -- `debug` (show e' ++ " : orig= " ++ show τ ++ ", elab= " ++ show τ') --of
@@ -426,7 +452,7 @@ typeOf e τ = do
             return e'' -- `debug` ("\n\nfound : " ++ show cs')
         _ -> do
             addToConstrList $ ConstrList $ unifyType (quote0 τ) (quote0 τ')
-            return e' -- `debug` ("\n\nadding : " ++ show e ++ " .... " ++ (show $ unifyType (unConstrList cs) (quote0 τ) (quote0 τ')))
+            return e' `debug` ("\n\nadding -> " ++ show e ++ " .... " ++ (show $ unifyType (quote0 τ) (quote0 τ')))
 
 unifyType :: Term -> Term -> [(Term,Term)]
 unifyType τ τ' | τ == τ' = []
@@ -447,15 +473,20 @@ unifyType (H n) x = [(H n, x)]
 unifyType x (H n) = [(H n, x)]
 unifyType InferM InferM = error $ "\n\nfailed on : " ++ show InferM ++ " and " ++ show InferM ++ "\n\n"
 
-unifyType x InferM = []
-unifyType InferM x = []
+unifyType x InferM = [] `debug` ("unifying " ++ show x ++ " with InferM")
+unifyType InferM x = [] `debug` ("unifying " ++ show x ++ " with InferM")
 unifyType τ τ' = error $ "\n\nfailed to unify on : " ++ show τ ++ " and " ++ show τ' ++ "\n\n"
 
 
-unifyConstraints :: MonadError String m => [(Term,Term)] -> [(Term,Term)] -> Bool -> Map Int Term -> m (Map Int Term)
+data UnificationSettings = Full | Partial
+
+unifyConstraints :: (MonadReader UnificationSettings m, MonadError String m) => [(Term,Term)] -> [(Term,Term)] -> Bool -> Map Int Term -> m (Map Int Term)
 unifyConstraints []                                  []  _     m = return m
-unifyConstraints []                                  acc False m = 
-    throwError $ "cannot unify rest (acc): " ++ show acc ++ "; m contains: " ++ show m
+unifyConstraints []                                  acc False m = do
+    s <- ask
+    case s of
+        Full -> throwError $ "cannot unify rest (acc): " ++ show acc ++ "; m contains: " ++ show m
+        Partial -> return m `debug` ("cannot unify rest (acc): " ++ show acc ++ "; m contains: " ++ show m)
 unifyConstraints []                                  acc True  m = 
     unifyConstraints (map (\(x,y) -> (substMetas m x, substMetas m y)) acc) [] False m
 unifyConstraints ((M x, M y):xs) acc flag m = case (M.lookup x m, M.lookup y m) of 
@@ -468,8 +499,10 @@ unifyConstraints ((M x, M y):xs) acc flag m = case (M.lookup x m, M.lookup y m) 
     (Nothing, Just ty) -> unifyConstraints xs acc flag $ M.insert x ty m
     (Nothing, Nothing) -> unifyConstraints xs ((M x, M y):acc) flag m
 unifyConstraints ((M x, y):xs)                       acc flag  m 
-    | doesNotContainMetas y = unifyConstraints xs acc True $ M.insert x y m
-    | otherwise = unifyConstraints xs ((M x, y):acc) flag m 
+    | doesNotContainMetas y = unifyConstraints xs acc True $ M.insert x y m `debug` ("unify : " ++ show (M x, y))
+    | otherwise = case M.lookup x m of
+        Just tx -> unifyConstraints xs ((tx, y):acc) flag m `debug` ("unify oterwise : " ++ show (M x, y))
+        Nothing -> unifyConstraints xs ((M x, y):acc) flag m 
 unifyConstraints ((x, M y):xs)                       acc flag  m = unifyConstraints ((M y,x):xs) acc flag m
 unifyConstraints ((Star, Star):xs)                   acc flag  m = unifyConstraints xs acc flag m
 unifyConstraints ((Name, Name):xs)                   acc flag  m = unifyConstraints xs acc flag m
@@ -500,8 +533,14 @@ unifyConstraints ((_, L _):xs)                       acc flag  m = unifyConstrai
 unifyConstraints (x:_)                               _   _     _ = throwError $ "bad constraint " ++ show x
 
 
+unifyConstraintsFull ts1 ts2 f m = flip runReaderT Full $ unifyConstraints ts1 ts2 f m
+unifyConstraintsPart ts1 ts2 f m = flip runReaderT Partial $ unifyConstraints ts1 ts2 f m
+
 doesNotContainMetas :: Term -> Bool
+-- doesNotContainMetas InferM = False
 doesNotContainMetas (M _) = False
+doesNotContainMetas (Set a) = doesNotContainMetas a
+doesNotContainMetas (MkSet a xs) = doesNotContainMetas a && foldr (\t b -> doesNotContainMetas t && b) True xs
 doesNotContainMetas (Π τ τ') = doesNotContainMetas τ && doesNotContainMetas τ'
 doesNotContainMetas (IΠ τ τ') = doesNotContainMetas (Π τ τ')
 doesNotContainMetas (e :@: es) = doesNotContainMetas e && foldr doesNotContainMetasApp True es
@@ -592,31 +631,51 @@ toSExprMaybe _ = Nothing
 
 -- TODO replace this with toSExprMaybe + a suitable error message??
 
-toSExpr :: Term -> SimpleSMT.SExpr
-toSExpr Prop = SimpleSMT.tBool
-toSExpr Name = SimpleSMT.const "String"
-toSExpr (MkName s) = SimpleSMT.const $ "\"" ++ toS s ++ "\""
-toSExpr (Set a) = SimpleSMT.fun "Set" [toSExpr a]
-toSExpr (MkSet a []) = 
-    SimpleSMT.fun "as" [SimpleSMT.const "emptyset", toSExpr (Set a)]
-toSExpr (MkSet _ [x]) = SimpleSMT.fun "singleton" [toSExpr x]
-toSExpr (MkSet _ (x:xs)) = 
-    SimpleSMT.fun "insert" $ map toSExpr xs ++ [SimpleSMT.fun "singleton" [toSExpr x]]
-toSExpr (M x) = SimpleSMT.const $ "M" ++ show x
-toSExpr (C "¬" :@: [E x]) = SimpleSMT.not $ toSExpr x
-toSExpr (C "&&" :@: [E x, E y]) = SimpleSMT.and (toSExpr x) (toSExpr y)
-toSExpr (C "∈" :@: [_, E x, E s]) = SimpleSMT.fun "member" [toSExpr x, toSExpr s]
-toSExpr (C "∉" :@: [_, E x, E s]) = SimpleSMT.not $ SimpleSMT.fun "member" [toSExpr x, toSExpr s]
-toSExpr (C "\\\\" :@: [_, E s, E x]) = SimpleSMT.fun "setminus" [toSExpr s, SimpleSMT.fun "singleton" [toSExpr x]]
-toSExpr (C "≡" :@: [_, E x, E y]) = SimpleSMT.eq (toSExpr x) (toSExpr y)
-toSExpr (C "∪" :@: [_, E x, E y]) = SimpleSMT.fun "union" [toSExpr x, toSExpr y]
-toSExpr (C "∩" :@: [_, E x, E y]) = SimpleSMT.fun "intersection" [toSExpr x, toSExpr y]
-toSExpr (C "\\" :@: [_, E x, E y]) = SimpleSMT.fun "setminus" [toSExpr x, toSExpr y]
-toSExpr (C "singleton" :@: [_, E x]) = SimpleSMT.fun "singleton" [toSExpr x]
-toSExpr (C "infer" :@: [_, E x]) = SimpleSMT.eq (toSExpr x) (toSExpr x) -- vacuous, but forces x to be declared, if it is a meta var
-toSExpr (L i) = SimpleSMT.const $ "L"++ show i
+toSExpr :: Map Text (SExpr Text Int) -> Term -> SimpleSMT.SExpr
+toSExpr _ Prop = SimpleSMT.tBool
+toSExpr _ Name = SimpleSMT.const "String"
+toSExpr smap (MkName s) = SimpleSMT.const $ "\"" ++ toS s ++ "\""
+toSExpr smap (Set a) = SimpleSMT.fun "Set" [toSExpr smap a]
+toSExpr smap (MkSet a []) = 
+    SimpleSMT.fun "as" [SimpleSMT.const "emptyset", toSExpr smap (Set a)]
+toSExpr smap (MkSet _ [x]) = SimpleSMT.fun "singleton" [toSExpr smap x]
+toSExpr smap (MkSet _ (x:xs)) = 
+    SimpleSMT.fun "insert" $ map (toSExpr smap) xs ++ [SimpleSMT.fun "singleton" [toSExpr smap x]]
+toSExpr _ (M x) = SimpleSMT.const $ "M" ++ show x
 
-toSExpr e = error $ "unsupported operation " ++ show e
+toSExpr smap t@(C op :@: args) = 
+    case M.lookup op smap of
+        Just sexp -> substSExpr smap t (map unExplImpl args) sexp
+        Nothing -> error $ "operation not found " ++ toS op
+    
+    where
+        substSExpr :: Map Text (SExpr Text Int) -> Term -> [Term] -> SExpr Text Int -> SimpleSMT.SExpr
+        substSExpr _ _ _ (NAtom x) = SimpleSMT.Atom (toS x)
+        substSExpr smap trm ts (VAtom i)
+            | 0 <= i && i < length ts = toSExpr smap (ts !! i)
+            | otherwise = error  $ "index out of range in " ++ show trm
+        substSExpr smap trm ts (List xs) = SimpleSMT.List $ 
+            map (substSExpr smap trm ts) xs
+        
+        unExplImpl :: ExplImpl a -> a
+        unExplImpl (I a) = a
+        unExplImpl (E a) = a
+     
+
+-- toSExpr (C "¬" :@: [E x]) = SimpleSMT.not $ toSExpr x
+-- toSExpr (C "&&" :@: [E x, E y]) = SimpleSMT.and (toSExpr x) (toSExpr y)
+-- toSExpr (C "∈" :@: [_, E x, E s]) = SimpleSMT.fun "member" [toSExpr x, toSExpr s]
+-- toSExpr (C "∉" :@: [_, E x, E s]) = SimpleSMT.not $ SimpleSMT.fun "member" [toSExpr x, toSExpr s]
+-- toSExpr (C "\\\\" :@: [_, E s, E x]) = SimpleSMT.fun "setminus" [toSExpr s, SimpleSMT.fun "singleton" [toSExpr x]]
+-- toSExpr (C "≡" :@: [_, E x, E y]) = SimpleSMT.eq (toSExpr x) (toSExpr y)
+-- toSExpr (C "∪" :@: [_, E x, E y]) = SimpleSMT.fun "union" [toSExpr x, toSExpr y]
+-- toSExpr (C "∩" :@: [_, E x, E y]) = SimpleSMT.fun "intersection" [toSExpr x, toSExpr y]
+-- toSExpr (C "\\" :@: [_, E x, E y]) = SimpleSMT.fun "setminus" [toSExpr x, toSExpr y]
+-- toSExpr (C "singleton" :@: [_, E x]) = SimpleSMT.fun "singleton" [toSExpr x]
+-- toSExpr (C "infer" :@: [_, E x]) = SimpleSMT.eq (toSExpr x) (toSExpr x) -- vacuous, but forces x to be declared, if it is a meta var
+toSExpr _ (L i) = SimpleSMT.const $ "L"++ show i
+
+toSExpr _ e = error $ "unsupported operation " ++ show e
 
  
 
@@ -649,8 +708,9 @@ defineMetas (M n) = do
     (SATDefs defined) <- getHas
     if not (n `S.member` defined) then do
         τ <- lookupInΓ (Meta n)
+        smap <- getSExprMap
         (SMTSolver proc) <- getHas `debug` ("found meta " ++ show n ++ " : " ++ show τ)
-        liftIO $ SimpleSMT.declare proc ("M" ++ show n) (toSExpr $ quote0 τ)
+        liftIO $ SimpleSMT.declare proc ("M" ++ show n) (toSExpr smap $ quote0 τ)
         addToSATDefs n
     else pure ()
 defineMetas (e :@: es) = mapM_ (\x -> case x of
@@ -658,27 +718,25 @@ defineMetas (e :@: es) = mapM_ (\x -> case x of
     I y -> defineMetas y) es
 defineMetas _ = return ()
 
-
-
-elabType0 ::  (Has BVCounter s, Has MetaCounter s, Has Γ s, Has ConstrList s, Has SATConstrList s, Has SATDefs s,
-    MonadState s m , Has SMTSolver s, MonadIO m, MonadError String m) => Bool -> 
-    Term -> m (Term, Type)
-elabType0 canContainMetas t = do 
-    (trm,typ) <- elabType t
+checkSat :: (Has Γ s, Has ConstrList s, Has SATConstrList s, Has SATDefs s,
+    MonadState s m , Has SMTSolver s, MonadIO m, MonadError String m) => Term -> m ()
+checkSat trm = do
     (ConstrList cs) <- getConstrList
-
     -- get collected sat constraints and replace all equal metas, collected in ConstrList
     (SATConstrList satcs) <- getSATConstrList
     let satcs' = map (substMetas $ mkMap cs) satcs
 
     -- translate to sat, first defining all meta variables
     mapM_ defineMetas satcs'
-    (SMTSolver proc) <- getHas
-    mapM_ (\s -> liftIO $ SimpleSMT.assert proc $ toSExpr s) satcs'
+    (SMTSolver proc) <- getHas `debug` ("produced following sat goals: " ++ show satcs')
+    smap <- getSExprMap
+    -- mapM_ (\s -> liftIO $ SimpleSMT.assert proc $ toSExpr smap s) satcs'
+    mapM_ (\(s,i) -> liftIO $ SimpleSMT.assert proc $ SimpleSMT.named ('_':show i) $ toSExpr smap s) (zip satcs' [0..])
+
     -- check sat
 
+    (SMTSolver proc) <- getHas
     r <- liftIO $ SimpleSMT.check proc
-
     case r of
         SimpleSMT.Sat -> do
             (SATDefs defined) <- getHas
@@ -687,12 +745,28 @@ elabType0 canContainMetas t = do
                 τ <- lookupInΓ (Meta d) `debug` ("\n\nSMT returned: " ++ show v)
                 let vt = fromSExpr v τ 
                 addToConstrList $ ConstrList [(M d,vt)] `debug` ("\n\nadding const: " ++ show (M d,vt)))
-        _ -> throwError $ "collected constraints: " ++ show satcs' ++ " are not satisfiable!"
-    -- get model and add to cs
+        SimpleSMT.Unsat -> do 
+            (SimpleSMT.List res) <- liftIO $ SimpleSMT.command proc (SimpleSMT.List [ SimpleSMT.Atom "get-unsat-core" ])
+            let unsat_core = map (\(SimpleSMT.Atom (_:num)) -> (read num :: Int)) res
+            σ <- unifyConstraintsPart cs [] False M.empty -- `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
+            
+            throwError $ "The following constraints are unsatisfiable:\n" ++
+                (intercalate "\n" $ map (\i -> "- " ++ (show $ substMetas σ $ satcs' !! i)) unsat_core) ++
+                "\nin the term:\n" ++ show trm
 
-    -- liftIO $ SimpleSMT.stop proc
+        _ -> throwError $ "unknown result"
+
+
+elabType0 ::  (Has BVCounter s, Has MetaCounter s, Has Γ s, Has ConstrList s, Has SATConstrList s, Has SATDefs s,
+    MonadState s m , Has SMTSolver s, MonadIO m, MonadError String m) => Bool -> 
+    Term -> m (Term, Type)
+elabType0 canContainMetas t = do 
+    (trm,typ) <- elabType t
+
+    checkSat trm
+
     (ConstrList cs') <- getConstrList -- `debug` "stopped SMT"
-    σ <- unifyConstraints cs' [] False M.empty `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
+    σ <- unifyConstraintsFull cs' [] False M.empty -- `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
     let trm' = substMetas σ trm
         typ' = substMetas σ $ quote0 typ
         holes = map (\(n,x) -> (n,substMetas σ x)) $ getHoles cs'
@@ -709,34 +783,13 @@ elabType0' ::  (Has BVCounter s, Has MetaCounter s, Has Γ s, Has ConstrList s, 
 elabType0' trm ty = do 
     (ty',_) <- elabType ty
     trm' <- typeOf trm (eval ty' [])
-    (ConstrList cs) <- getConstrList
 
-    -- get collected sat constraints and replace all equal metas, collected in ConstrList
-    (SATConstrList satcs) <- getSATConstrList
-    let satcs' = map (substMetas $ mkMap cs) satcs
-
-    -- translate to sat, first defining all meta variables
-    mapM_ defineMetas satcs'
-    (SMTSolver proc) <- getHas
-    mapM_ (\s -> liftIO $ SimpleSMT.assert proc $ toSExpr s) satcs'
-    -- check sat
-
-    r <- liftIO $ SimpleSMT.check proc
-
-    case r of
-        SimpleSMT.Sat -> do
-            (SATDefs defined) <- getHas
-            forM_ (S.toList defined) (\d -> do
-                (SimpleSMT.Other v) <- liftIO $ SimpleSMT.getExpr proc (SimpleSMT.const $ "M" ++ show d)
-                τ <- lookupInΓ (Meta d) `debug` ("\n\nSMT returned: " ++ show v)
-                let vt = fromSExpr v τ 
-                addToConstrList $ ConstrList [(M d,vt)] `debug` ("\n\nadding const: " ++ show (M d,vt)))
-        _ -> throwError $ "collected constraints: " ++ show satcs' ++ " are not satisfiable!"
+    checkSat trm
     -- get model and add to cs
 
     -- liftIO $ SimpleSMT.stop proc
     (ConstrList cs') <- getConstrList -- `debug` "stopped SMT"
-    σ <- unifyConstraints cs' [] False M.empty `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
+    σ <- unifyConstraintsFull cs' [] False M.empty -- `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
     let trm'' = substMetas σ trm'
         ty' = substMetas σ ty
         holes = map (\(n,x) -> (n,substMetas σ x)) $ getHoles cs'
@@ -755,19 +808,24 @@ getHoles (_:xs) = getHoles xs
 
 -- runElabType0 :: Bool -> Γ -> Term -> IO (Either String (Term, Type))
 -- runElabType0 canContainMetas g t = do
---     log <- SimpleSMT.newLogger 0
---     smt <- SimpleSMT.newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (if debugMode then Just log else Nothing)
---     SimpleSMT.setLogic smt "QF_UFSLIAFS" -- "QF_UFLIAFS"
+--     smt <- initSMT
 
 --     res <- runExceptT $ (flip (evalStateT @(ExceptT String IO)) (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt)) $ elabType0 canContainMetas t
 --     liftIO $ SimpleSMT.stop smt
 --     return res
 
-runElabType0' :: (MonadIO m, MonadError String m) => Bool -> Γ -> Term -> m (Term, Type)
-runElabType0' canContainMetas g t = do
+initSMT :: MonadIO m => m SimpleSMT.Solver
+initSMT = do
     log <- liftIO $ SimpleSMT.newLogger 0
     smt <- liftIO $ SimpleSMT.newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (if debugMode then Just log else Nothing)
     liftIO $ SimpleSMT.setLogic smt "QF_UFSLIAFS" -- "QF_UFLIAFS"
+    liftIO $ SimpleSMT.setOption smt ":produce-unsat-cores" "true"
+    return smt
+
+
+runElabType0' :: (MonadIO m, MonadError String m) => Bool -> Γ -> Term -> m (Term, Type)
+runElabType0' canContainMetas g t = do
+    smt <- initSMT
 
     res <- (flip evalStateT (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt)) $ elabType0 canContainMetas t
     liftIO $ SimpleSMT.stop smt
@@ -775,9 +833,7 @@ runElabType0' canContainMetas g t = do
 
 runElabType0List :: (MonadIO m, MonadError String m) => Γ -> Term -> Term -> m (Term, Type)
 runElabType0List g trm ty = do
-    log <- liftIO $ SimpleSMT.newLogger 0
-    smt <- liftIO $ SimpleSMT.newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (if debugMode then Just log else Nothing)
-    liftIO $ SimpleSMT.setLogic smt "QF_UFSLIAFS" -- "QF_UFLIAFS"
+    smt <- initSMT
 
     res <- (flip (evalStateT ) (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt)) $ elabType0' trm ty
     liftIO $ SimpleSMT.stop smt
@@ -793,32 +849,12 @@ typeOf0 t τ = do
     trm <- typeOf t τ
     (ConstrList cs) <- getConstrList
 
-    -- get collected sat constraints and replace all equal metas, collected in ConstrList
-    (SATConstrList satcs) <- getSATConstrList
-    let satcs' = map (substMetas $ mkMap cs) satcs
-
-    -- translate to sat, first defining all meta variables
-    mapM_ defineMetas satcs'
-    (SMTSolver proc) <- getHas
-    mapM_ (\s -> liftIO $ SimpleSMT.assert proc $ toSExpr s) satcs'
-    -- check sat
-
-    r <- liftIO $ SimpleSMT.check proc
-
-    case r of
-        SimpleSMT.Sat -> do
-            (SATDefs defined) <- getHas
-            forM_ (S.toList defined) (\d -> do
-                (SimpleSMT.Other v) <- liftIO $ SimpleSMT.getExpr proc (SimpleSMT.const $ "M" ++ show d)
-                τ <- lookupInΓ (Meta d) `debug` ("\n\nSMT returned: " ++ show v)
-                let vt = fromSExpr v τ 
-                addToConstrList $ ConstrList [(M d,vt)] `debug` ("\n\nadding const: " ++ show (M d,vt)))
-        _ -> throwError $ "collected constraints: " ++ show satcs' ++ " are not satisfiable!"
+    checkSat trm
     -- get model and add to cs
 
     -- liftIO $ SimpleSMT.stop proc
     (ConstrList cs') <- getConstrList -- `debug` "stopped SMT in typeOf0"
-    σ <- unifyConstraints cs' [] False M.empty --`debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
+    σ <- unifyConstraintsFull cs' [] False M.empty --`debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
     let trm' = substMetas σ trm
         holes = map (\(n,x) -> (n,substMetas σ x)) $ getHoles cs'
     liftIO $ mapM_ (\(n,x) -> putStrLn $ ("\n================================\n" ++ show (H n) ++ " : " ++ show x ++ "\n================================")) holes
@@ -839,13 +875,7 @@ typeOf0 t τ = do
 
 evalTypeOf0 :: (MonadError String m, MonadIO m) => Γ -> Term -> Type -> m Term
 evalTypeOf0 g t τ = do
-    -- log <- liftIO $ SimpleSMT.newLogger 0
-    -- smt <- liftIO $ SimpleSMT.newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (if debugMode then Just log else Nothing)
-    -- liftIO $ SimpleSMT.setLogic smt "QF_UFSLIAFS" -- "QF_UFLIAFS"
-
-    log <- liftIO $ SimpleSMT.newLogger 0
-    smt <- liftIO $ SimpleSMT.newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (if debugMode then Just log else Nothing)
-    liftIO $ SimpleSMT.setLogic smt "QF_UFSLIAFS" -- "QF_UFLIAFS"
+    smt <- initSMT
 
     res <- flip evalStateT (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt) $ typeOf0 t τ
 
@@ -853,11 +883,22 @@ evalTypeOf0 g t τ = do
     return res
 
 
+data SExpr n v = NAtom n
+             | VAtom v
+             | List [SExpr n v]
+    deriving (Show, Eq, Data)
 
+instance Bifunctor SExpr where
+    bimap f g (NAtom n) = NAtom $ f n
+    bimap f g (VAtom v) = VAtom $ g v
+    bimap f g (List xs) = List $ map (bimap f g) xs
+
+deriving instance Data SimpleSMT.SExpr
 
 data Decl = 
     Data Text Term [(Text, Term)]  
   | Def Text (Maybe Term) Term
+  | PropDef Text Term (SExpr Text Int)
     deriving (Show, Eq, Data)
 
 codom :: Term -> Term
@@ -895,18 +936,27 @@ codom x = x
 
 
 defineDecl :: (MonadIO m, MonadError String m) => Bool -> Γ -> Decl -> m Γ 
-defineDecl ignoreCodom env@(Γ g) (Data n t xs) = do
-    case lookup (Global n) g of
+defineDecl ignoreCodom env@(Γ tys ps) (Data n t xs) = do
+    case M.lookup (Global n) tys of
         Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
         Nothing -> do
             t' <- evalTypeOf0 env t VStar
             let τ = eval t' []
-            if ignoreCodom then pure () else unless (codom t == Star || codom t == Prop) $ throwError $ toS n ++ " data declaration should have type ... -> */Prop"
-            (Γ g') <- defineTyCon (Γ $ (Global n,τ):g) n xs
-            return $ Γ $ g' ++ ((Global n,τ):g)
+            if ignoreCodom then pure () else unless (codom t == Star) $ throwError $ toS n ++ " data declaration should have type ... -> */Prop"
+            (Γ tys' _) <- defineTyCon (Γ (M.insert (Global n) τ tys) ps) n xs
+            return $ Γ (M.insert (Global n) τ $ tys' `M.union` tys) ps
 
-defineDecl _ env@(Γ g) (Def n Nothing trm) = do
-    case lookup (Global n) g of
+defineDecl ignoreCodom env@(Γ tys ps) (PropDef n t sexp) = do
+    case M.lookup (Global n) tys of
+        Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
+        Nothing -> do
+            t' <- evalTypeOf0 env t VStar
+            let τ = eval t' []
+            -- if ignoreCodom then pure () else unless (codom t == Prop) $ throwError $ toS n ++ " data declaration should have type ... -> */Prop"
+            return $ Γ (M.insert (Global n) τ $ tys) (M.insert n sexp ps)
+
+defineDecl _ env@(Γ tys _) (Def n Nothing trm) = do
+    case M.lookup (Global n) tys of
         Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
         Nothing -> do
             (t', τ) <- runElabType0' False env trm
@@ -914,14 +964,15 @@ defineDecl _ env@(Γ g) (Def n Nothing trm) = do
                                 "Successfully elaborated\n" ++ show t' ++ " : " ++ show τ ++
                                 "\n-------------------------------------------"
             return $ env
-defineDecl _ env@(Γ g) (Def n (Just ty) trm) = do
-    case lookup (Global n) g of
+defineDecl _ env@(Γ tys _) (Def n (Just ty) trm) = do
+    case M.lookup (Global n) tys of
         Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
         Nothing -> do
             (ty',_) <- runElabType0' True env ty
-
-            trm' <- evalTypeOf0 env trm (eval ty' []) `debug` ("\nran elabType0 on ty and got: " ++ show ty')
-            
+            pure ()  `debug` ("\nran elabType0 on ty and got: " ++ show ty')
+            trm' <- evalTypeOf0 env trm (eval ty' [])
+            pure () `debug` ("\nran evalTypeOf0 on trm and got: " ++ show trm')
+ 
             -- if the elab term is a hole, we dont want to try to elab its type again...
             ty'' <- case trm' of
                 (H _) -> pure $ eval ty' []
@@ -952,10 +1003,10 @@ defineDecl _ env@(Γ g) (Def n (Just ty) trm) = do
 
 
 defineTyCon :: (MonadIO m, MonadError String m) =>  Γ -> Text -> [(Text, Term)] -> m Γ 
-defineTyCon _ _ [] = return $ Γ []
-defineTyCon env@(Γ g) n ((c, t):xs) = do
-    (Γ g') <- defineTyCon env n xs
-    case lookup (Global c) (g ++ g') of
+defineTyCon env@(Γ _ ps) _ [] = return $ Γ M.empty ps
+defineTyCon env@(Γ tys ps) n ((c, t):xs) = do
+    (Γ tys' _) <- defineTyCon env n xs
+    case M.lookup (Global c) (tys `M.union` tys') of
         Just _ -> throwError $ "constant " ++ toS c ++ " already defined"
         Nothing -> do
             case codom t of
@@ -965,5 +1016,5 @@ defineTyCon env@(Γ g) n ((c, t):xs) = do
             -- (t', τ) <- evalElabType0 g t
             t' <- evalTypeOf0 env t VStar 
             -- strictPositivityCheck True n t
-            return $ Γ $ (Global c,eval t' []):g' -- `debug` ("have " ++ show t ++ " found " ++ show t') 
+            return $ Γ (M.insert (Global c) (eval t' []) tys') ps -- `debug` ("have " ++ show t ++ " found " ++ show t') 
 
