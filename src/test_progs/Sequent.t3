@@ -1,0 +1,150 @@
+infixl 1 &&
+infix 2 ⊢ , ∈ , ++, ≡
+infix 3 \\ , \
+infixr 3 → , -< , >, ∷, $
+infixl 4 ∧, ∨, ;, ∪, ∩
+
+
+language LaTeX
+
+
+
+data [SMT] F : * where
+    At : (atom : Name) -> F
+  | (∧) [andF] : (andL:F) -> (andR:F) -> F
+  | (∨) [orF] : (orL:F) -> (orR:F) -> F
+  | (→) [impF] : (impL:F) -> (impR:F) -> F
+  | ¬ [negF] : (neg:F) -> F
+end
+
+translation F to LaTeX where
+    At a -> "#{a}"
+  | (∧) a b -> "#{a} \wedge #{b}"
+  | (∨) a b -> "#{a} \vee #{b}"
+  | (→) a b -> "#{a} \to #{b}"
+  | ¬ a -> "\neg #{a}"
+end
+
+
+data [SMT] List : Type -> * where
+    ∅ [nil] : {a : Type} -> List a
+  | (∷) [cons] : {a : Type} -> (hd : a) -> (tl : List a) -> List a
+end
+
+
+data [SMT] Pair : Type -> Type -> * where
+    MkPair : {a : Type} -> {b : Type} -> (fst:a) -> (snd:b) -> Pair a b
+end
+
+prop (≡) : {a : Type} -> (x : a) -> (y : a) -> Prop where 
+  ('= x y)
+end
+
+smt
+(define-fun-rec concatF ((x (List F)) (y (List F))) (List F)
+ (ite (= x (as nil (List F)))
+      y
+      (cons (hd x) (concatF (tl x) y))
+ )
+)
+end
+
+prop (++) : {a : Type} -> (x : List F) -> (y : List F) -> List F where 
+  ('concatF x y)
+end
+
+data (⊢) : List F -> List F -> Type where
+    Id : {a : Name} -> (At a) ∷ ∅ ⊢ (At a) ∷ ∅
+  | AndL1 : {Γ : List F} -> {Δ : List F} -> {A : F} -> {B : F} ->
+         A ∷ Γ ⊢ Δ ->
+      ---------------
+      (A ∧ B) ∷ Γ ⊢ Δ
+  | AndL2 : {Γ : List F} -> {Δ : List F} -> {A : F} -> {B : F} ->
+         B ∷ Γ ⊢ Δ ->
+      ---------------
+      (A ∧ B) ∷ Γ ⊢ Δ
+  | OrL : {Γ₁ : List F} -> {Γ₂ : List F} -> 
+          {Δ₁ : List F} -> {Δ₂ : List F} -> 
+          {Γ : List F} -> [Γ ≡ (Γ₁ ++ Γ₂)] -> 
+          {Δ : List F} -> 
+          {A : F} -> {B : F} ->
+      (A ∷ Γ₁) ⊢ Δ₁ -> (B ∷ Γ₂) ⊢ Δ₂ -> 
+      ------------------------------
+              (A ∨ B) ∷ Γ ⊢ Δ
+end
+
+
+
+
+-- def test : ((At 'a) ∨ (At 'b)) ∷ ∅ ⊢ ((At 'a) ∨ (At 'b)) ∷ ∅ where
+--   test = OrL ? ?
+-- end
+
+
+
+--   IdIR    : {r : Name} -> {𝓝 : Set Name} -> {ts : List 𝓝 Trm} -> 
+
+--             --------------------
+--             IR r ts ⊢ ↑ (R r ts) 
+--   |
+--   AllR    : {𝓝ₓ : Set Name} -> {𝓝ₐ : Set Name} -> 
+--             {X : S 𝓝ₓ} -> {x : Name} -> {A : F 𝓝ₐ} -> 
+
+--           X ⊢ Q x (↑ A) ->
+--           -------------
+--           X ⊢ ↑ (∀ x A)
+--   | 
+--   Q⊙Disp  : {𝓝ₓ : Set Name} -> {𝓝ᵧ : Set Name} -> 
+--             {X : S 𝓝ₓ} -> {Y : S 𝓝ᵧ} -> {x : Name} ->
+
+--             Y ⊢ Q x X ->
+--             ---------
+--             ⊙ x Y ⊢ X
+--   | 
+--   Q⊙Disp2 : {𝓝ₓ : Set Name} -> {𝓝ᵧ : Set Name} -> 
+--             {X : S 𝓝ₓ} -> {Y : S 𝓝ᵧ} -> {x : Name} ->
+
+--             (⊙ x Y) ⊢ X ->
+--             -----------
+--             Y ⊢ (Q x X)
+--   | 
+--   ∘R :     {𝓝ₓ : Set Name} -> {𝓝ₐ : Set Name} -> 
+--          {X : S 𝓝ₓ} -> {x : Name} -> {A : F 𝓝ₐ} -> 
+
+--            X ⊢ ⊙ x (↑ A) ->
+--            -------------
+--            X ⊢ ↑ (∘ x A)
+--   | 
+--   ⊙mon :   {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> 
+--            {X : S 𝓝} -> {Y : S 𝓝} -> {x : Name} ->
+
+--                   X ⊢ Y -> 
+--          -----------------------
+--          ⊙ {𝓝} {𝓝₂} x X ⊢ ⊙ x Y
+--   | 
+--   IRL :    {r : Name} -> {𝓝 : Set Name} -> 
+--            {X : S 𝓝} -> {ts : List 𝓝 Trm} -> 
+
+--          IR r ts ⊢ X ->
+--          --------------
+--          ↑ (R r ts) ⊢ X
+-- end
+
+
+-- translation (⊢) to LaTeX where
+--     IdIR : x ⊢ y -> "\AXC{}\RightLabel{$\sub{Id}{\mathbb{I}R}$}\n\UIC{$#{x} \vdash #{y}$}"
+--   | AllR p : x ⊢ y -> "#{p}\RightLabel{$\sub{\forall}{R}$}\n\UIC{$#{x} \vdash #{y}$}"
+--   | Q⊙Disp2 p : x ⊢ y -> "#{p}\RightLabel{(Q/⊙)}\n\UIC{$#{x} \vdash #{y}$}"
+--   | ∘R p : x ⊢ y -> "#{p}\RightLabel{$\sub{∘}{R}$}\n\UIC{$#{x} \vdash #{y}$}"
+--   | ⊙mon p : x ⊢ y -> "#{p}\RightLabel{⊙mon}\n\UIC{$#{x} \vdash #{y}$}"
+--   | IRL p : x ⊢ y -> "#{p}\RightLabel{$\sub{\mathbb{I} R}{L}$}\n\UIC{$#{x} \vdash #{y}$}"
+-- end
+
+
+-- def lemma : ↑(R 'f ∅) ⊢ ↑(∀ 'x (∘ 'x (R 'f ∅))) where
+--     lemma = (AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR)))))
+-- end
+
+-- translate lemma to LaTeX where
+--   output = "./out.tex"
+-- end

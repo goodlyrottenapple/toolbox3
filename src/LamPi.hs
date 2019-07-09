@@ -1,16 +1,22 @@
 {-# LANGUAGE OverloadedStrings, DeriveDataTypeable, FlexibleContexts, 
-PatternSynonyms, DeriveFunctor, ScopedTypeVariables, TypeApplications,
-StandaloneDeriving #-}
+PatternSynonyms, DeriveFunctor, DeriveGeneric, DeriveAnyClass, 
+ScopedTypeVariables, TypeApplications, FlexibleInstances, IncoherentInstances, 
+StandaloneDeriving, RecordWildCards #-}
 
 
 module LamPi where
+
+import UnicodeEnc
+
+import Data.Aeson(ToJSON, encode)
+import GHC.Generics
 
 import Data.Text(Text)
 import qualified Data.Text as T
 import Control.Monad(unless)
 import Data.String.Conv(toS)
 
-import Data.Data(Data)
+import Data.Data(Data, Typeable)
 import Data.Has
 import Data.Bifunctor
 
@@ -27,19 +33,25 @@ import Data.Set(Set)
 import qualified Data.Set as S
 
 import Debug.Trace(trace)
-import Data.List(intercalate)
+import Data.List(intercalate, unfoldr, sortBy)
 
-import qualified SimpleSMT
--- import SMT
+import qualified SimpleSMT as SMT
+import qualified Control.Exception as X
+import System.Process(runInteractiveProcess, waitForProcess)
+import Control.Concurrent(forkIO)
+import System.IO (hFlush, hGetLine, hGetContents, hPutStrLn, stdout, hClose)
+import Data.IORef(newIORef, atomicModifyIORef, modifyIORef', readIORef,
+                  writeIORef)
 infixl 7 :@:
 
 debugMode = False
+-- smtLogMode = True
 
 showImpl = False
 
 debug = if debugMode then flip trace else (\a _ -> a)
 
-data ExplImpl a = I a | E a deriving (Show, Eq, Ord, Data, Functor)
+data ExplImpl a = I a | E a deriving (Show, Eq, Ord, Data, Functor, Generic, ToJSON)
 
 data Name = Global Text
           | Local Int
@@ -47,7 +59,7 @@ data Name = Global Text
           | Meta Int
           | InferMeta
           | UserHole Int
-          deriving (Eq, Ord, Data)
+          deriving (Eq, Ord, Data, Generic, ToJSON)
 
 instance Show Name where
     show (Global t) = toS t 
@@ -57,28 +69,34 @@ instance Show Name where
     show (UserHole i) = "?" ++ show i
     show InferMeta = "_"
 
-data Term = Star
-          | Prop
-          | Name
+data Term = StarT
+          | PropT
+          | NameT
           | MkName Text
-          | Set Term
+          | SetT Term
           | MkSet Term [Term]
-          | Π Term Term
+          | IntT
+          | MkInt Int
+          -- | RealT
+          -- | MkReal Int
+          | Π (Maybe Text) Term Term
           | IΠ Term Term
           | Term :⇒: Term
           | Bound Int
           | Free Name
           | Term :@: [ExplImpl Term]
-          deriving (Ord, Data)
+          deriving (Ord, Data, Generic, ToJSON)
 
 instance Eq Term where
-    Star == Star = True
-    Prop == Prop = True
-    Name == Name = True
+    StarT == StarT = True
+    PropT == PropT = True
+    NameT == NameT = True
     MkName x == MkName y = x == y
-    Set x == Set y = x == y
+    SetT x == SetT y = x == y
     MkSet a x == MkSet b y = a == b && S.fromList x == S.fromList y
-    Π a b == Π c d = a == c && b == d
+    IntT == IntT = True
+    MkInt x == MkInt y = x == y
+    Π _ a b == Π _ c d = a == c && b == d
     IΠ a b == IΠ c d = a == c && b == d
     a :⇒: b == c :⇒: d = a == c && b == d
     Bound x == Bound y = x == y
@@ -90,13 +108,16 @@ instance Eq Term where
 
 
 instance Show Term where
-    show Star = "*"
-    show Prop = "Prop"
-    show Name = "Name"
+    show StarT = "*"
+    show PropT = "Prop"
+    show NameT = "Name"
     show (MkName s) = "\'" ++ toS s
-    show (Set a) = "Set " ++ show a
+    show (SetT a) = "Set " ++ show a
     show (MkSet a s) = "(⦃" ++ (intercalate "," (S.toList (S.fromList (map show s)))) ++ "⦄ : " ++ "Set " ++ show a ++ ")"
-    show (Π t t') = "Π " ++ show t ++ " . " ++ show t'
+    show IntT = "Int"
+    show (MkInt i) = toS $ show i
+    show (Π Nothing t t') = "Π " ++ show t ++ " . " ++ show t'
+    show (Π (Just n) t t') = "Π (" ++ toS n ++ ") " ++ show t ++ " . " ++ show t'
     show (IΠ t t') = "Π {" ++ show t ++ "} . " ++ show t'
     show (t :⇒: t') = "[" ++ show t ++ "] -> " ++ show t'
     show (Bound n) = "B" ++ show n
@@ -118,13 +139,15 @@ pattern L x = Free (Local x)
 pattern H x = Free (UserHole x)
 pattern InferM = Free InferMeta
 
-data Value = VStar
-           | VProp
-           | VName
+data Value = VStarT
+           | VPropT
+           | VNameT
            | VMkName Text
-           | VSet Value
+           | VSetT Value
            | VMkSet Value [Value]
-           | VΠ Value (Value -> Value)
+           | VIntT
+           | VMkInt Int
+           | VΠ (Maybe Text) Value (Value -> Value)
            | VIΠ Value (Value -> Value)
            | VSArr Value Value
            | VNeutral Neutral
@@ -144,15 +167,38 @@ type Type = Value
 
 data Γ = Γ { 
     types :: Map Name Type
+  , constrs :: Map Name (Set Name)
+  , defs :: Map Name (Term, Type)
   , props :: Map Text (SExpr Text Int)
- } 
+  , langs :: Set Text
+  , translations :: Map (Text, Name) ([ExplImpl Term], Maybe [ExplImpl Term], Text)
+  , smtOpts :: [SMT.SExpr]
+  , smtRaw :: [SMT.SExpr]
+  , smtLogLevel :: Int
+  , smtLogEnabled :: Bool
+ }
+
+emptyΓ = Γ M.empty M.empty M.empty M.empty (S.fromList ["JSON"]) M.empty [] [] 0 False
 
 instance Show Γ where
-    show (Γ ts ps) = "Types:\n" ++ 
-        (intercalate "\n" $ map (\(n,t) -> show n ++ " -> " ++ show t) $ M.toList ts) ++
-        "\nDefined Props:\n" ++
-        (intercalate "," $ map (\(n,_) -> show n) $ M.toList ps)
-
+    show Γ{..} = "\n\n\n\nTypes:\n" ++ 
+        (intercalate "\n" $ map (\(n,t) -> show n ++ " -> " ++ show t) $ M.toList types) ++
+        "\n\n--------------------------------------------------------\n\nConstructors:\n" ++
+        (intercalate "\n" $ map (\(n,e) -> show n ++ " : " ++ (show $ S.toList e)) $ M.toList constrs) ++
+        "\n\n--------------------------------------------------------\n\nDefs:\n" ++
+        (intercalate "\n" $ map (\(n,(e,t)) -> show n ++ " : " ++ show t ++ " = " ++ show e) $ M.toList defs) ++
+        "\n\n--------------------------------------------------------\n\nDefined Props:\n" ++
+        (intercalate "\n" $ map (\(n,e) -> show n ++ " : " ++ show e) $ M.toList props) ++
+        "\n\n--------------------------------------------------------\n\nDefined Languages:\n" ++
+        (intercalate "," $ map show $ S.toList langs) ++
+        "\n\n--------------------------------------------------------\n\nTranslations:\n" ++
+        (intercalate "\n" $ map (\(n,e) -> show n ++ " : " ++ show e) $ M.toList translations) ++
+        "\n\n--------------------------------------------------------\n\nSMT opts:\n" ++
+        (intercalate "," $ map (\e -> SMT.showsSExpr e "") $ smtOpts) ++
+        "\n\n--------------------------------------------------------\n\nSMT opts:\n" ++
+        (intercalate "," $ map (\e -> SMT.showsSExpr e "") $ smtRaw) ++
+        "\n\n--------------------------------------------------------\n\nSMT Log level: " ++ show smtLogLevel ++ 
+        "\n\n--------------------------------------------------------\n\nSMT Log enabled: " ++ show smtLogEnabled
 
 type Env = [Value]
 
@@ -163,19 +209,21 @@ vfree n = VNeutral (NFree n)
 
 vapp :: Value -> [ExplImpl Value] -> Value 
 -- vapp (VLam f) v =f v
-vapp (VΠ n f) [E v] = f v
+vapp (VΠ _ n f) [E v] = f v
 vapp (VIΠ n f) [I v] = f v
 vapp (VNeutral n) vs = VNeutral (NApp n vs)
 
 
 eval :: Term -> Env -> Value
-eval Star d = VStar
-eval Prop d = VProp
-eval Name d = VName
+eval StarT d = VStarT
+eval PropT d = VPropT
+eval NameT d = VNameT
 eval (MkName s) d = VMkName s
-eval (Set a) d = VSet (eval a d)
+eval (SetT a) d = VSetT (eval a d)
 eval (MkSet a s) d = VMkSet (eval a d) (map (flip eval d) s)
-eval (Π τ τ') d = VΠ (eval τ d) (\x -> eval τ' (x:d))
+eval IntT d = VIntT
+eval (MkInt i) d = VMkInt i
+eval (Π n τ τ') d = VΠ n (eval τ d) (\x -> eval τ' (x:d))
 eval (IΠ τ τ') d = VIΠ (eval τ d) (\x -> eval τ' (x:d))
 eval (τ :⇒: τ') d = VSArr (eval τ d) (eval τ' d)
 eval (Free x) d = vfree x
@@ -183,34 +231,34 @@ eval (Bound i) d = d !! i
 eval (e :@: es) d = vapp (eval e d) (fmap (fmap (flip eval d)) es)
 
 subst :: Int -> Term -> Term -> Term
-subst i r (Π τ τ') = Π (subst i r τ) (subst (i+1) r τ')
+subst i r (Π n τ τ') = Π n (subst i r τ) (subst (i+1) r τ')
 subst i r (IΠ τ τ') = IΠ (subst i r τ) (subst (i+1) r τ')
 subst i r (τ :⇒: τ') = (subst i r τ) :⇒: (subst i r τ')
 subst i r (Bound j) = if i == j then r else Bound j 
 subst i r (e :@: es) = subst i r e :@: (fmap (fmap (subst i r)) es)
-subst i r (Set a) = Set (subst i r a)
+subst i r (SetT a) = SetT (subst i r a)
 subst i r (MkSet a s) = MkSet (subst i r a) (map (subst i r) s)
 subst i r x = x
 
 
 bind :: Int -> Int -> Term -> Term
-bind i r (Π τ τ') = Π (bind i r τ) (bind (i+1) r τ')
+bind i r (Π n τ τ') = Π n (bind i r τ) (bind (i+1) r τ')
 bind i r (IΠ τ τ') = IΠ (bind i r τ) (bind (i+1) r τ')
 bind i r (τ :⇒: τ') = (bind i r τ) :⇒: (bind i r τ')
 bind i r e@(Free (Local j)) = if r == j then Bound i else e
 bind i r (e :@: es) = bind i r e :@: (fmap (fmap (bind i r)) es)
-bind i r (Set a) = Set (bind i r a)
+bind i r (SetT a) = SetT (bind i r a)
 bind i r (MkSet a s) = MkSet (bind i r a) (map (bind i r) s)
 bind i r x = x
 
 
 substMeta :: Int -> Term -> Term -> Term
-substMeta i r (Π τ τ') = Π (substMeta i r τ) (substMeta i r τ')
+substMeta i r (Π n τ τ') = Π n (substMeta i r τ) (substMeta i r τ')
 substMeta i r (IΠ τ τ') = IΠ (substMeta i r τ) (substMeta i r τ')
 substMeta i r (Bound j) = Bound j 
 substMeta i r (Free (Meta j)) = if i == j then r else Free (Meta j)
 substMeta i r (e :@: es) = substMeta i r e :@: (fmap (fmap (substMeta i r)) es)
-substMeta i r (Set a) = Set (substMeta i r a)
+substMeta i r (SetT a) = SetT (substMeta i r a)
 substMeta i r (MkSet a s) = MkSet (substMeta i r a) (map (substMeta i r) s)
 substMeta i r x = x
 
@@ -220,14 +268,16 @@ quote0 :: Value -> Term
 quote0 = quote 0
 
 quote :: Int -> Value -> Term
-quote i VStar = Star
-quote i VProp = Prop
-quote i VName = Name
+quote i VStarT = StarT
+quote i VPropT = PropT
+quote i VNameT = NameT
 quote i (VMkName s) = MkName s
-quote i (VSet a) = Set (quote i a)
+quote i (VSetT a) = SetT (quote i a)
 quote i (VMkSet a s) = MkSet (quote i a) (map (quote i) s)
+quote i VIntT = IntT
+quote i (VMkInt j) = MkInt j
 
-quote i (VΠ v f) = Π (quote i v) (quote (i + 1) (f (vfree (Quote i))))
+quote i (VΠ n v f) = Π n (quote i v) (quote (i + 1) (f (vfree (Quote i))))
 quote i (VIΠ v f) = IΠ (quote i v) (quote (i + 1) (f (vfree (Quote i))))
 quote i (VSArr v v') = (quote i v) :⇒: (quote i v')
 quote i (VNeutral n) = neutralQuote i n
@@ -267,7 +317,7 @@ getFreshAndIncrementBV = do
     return $ unBVCounter $ getter s
 
 addToΓ :: (Has Γ s, MonadState s m) => Name -> Type -> m ()
-addToΓ n τ = modify (\s -> modifier (\(Γ ts ps) -> Γ (M.insert n τ ts) ps ) s)
+addToΓ n τ = modify (\s -> modifier (\env@Γ{..} -> env{types = M.insert n τ types}) s)
 
 lookupInΓ :: (Has Γ s, MonadState s m , MonadError String m) => Name -> m Type
 lookupInΓ n = do
@@ -278,8 +328,8 @@ lookupInΓ n = do
 
 getSExprMap :: (Has Γ s, MonadState s m) => m (Map Text (SExpr Text Int))
 getSExprMap = do
-    (Γ _ s) <- getter <$> get
-    return s
+    Γ{..} <- getter <$> get
+    return props
 
 getConstrList :: (Has ConstrList s, MonadState s m) => m ConstrList
 getConstrList = getter <$> get
@@ -309,59 +359,60 @@ getSATConstrList = getter <$> get
 elabType :: (Has BVCounter s, Has MetaCounter s, Has Γ s, Has ConstrList s, Has SATConstrList s,
     MonadState s m , Has SMTSolver s, MonadIO m, MonadError String m) => 
     Term -> m (Term, Type)
-elabType Star = return (Star, VStar)
-elabType Prop = return (Prop, VStar)
-elabType Name = return (Name, VStar)
-elabType (MkName s) = return (MkName s, VName)
-
-elabType (Set α) = do
-    α' <- typeOf α VStar
-    return (Set α', VStar)
+elabType StarT = return (StarT, VStarT)
+elabType PropT = return (PropT, VStarT)
+elabType NameT = return (NameT, VStarT)
+elabType (MkName s) = return (MkName s, VNameT)
+elabType IntT = return (IntT, VStarT)
+elabType (MkInt i) = return (MkInt i, VIntT)
+elabType (SetT α) = do
+    α' <- typeOf α VStarT
+    return (SetT α', VStarT)
 elabType (MkSet α []) = do
-    α' <- typeOf α VStar
+    α' <- typeOf α VStarT
     let α'' = eval α' [] `debug` ("{| |} : " ++ (show $ eval α' []))
-    return $ (MkSet α' [], VSet α'')
+    return $ (MkSet α' [], VSetT α'')
 elabType (MkSet α xs) = do
     -- let α' = eval α [ ]
-    α' <- typeOf α VStar
+    α' <- typeOf α VStarT
     let α'' = eval α' []
     xs' <- mapM (flip typeOf α'') xs
     pure ()  `debug` (show xs' ++ " : " ++ show α'')
-    return (MkSet α' xs', VSet α'')
-elabType (Π ρ ρ') = do
-    τ <- typeOf ρ VStar
+    return (MkSet α' xs', VSetT α'')
+elabType (Π n ρ ρ') = do
+    τ <- typeOf ρ VStarT
     i <- getFreshAndIncrementBV
     addToΓ (Local i) $ eval ρ []
     
-
+    smap <- getSExprMap
     -- using this to only define bound vars that have a SAT representation
-    case toSExprMaybe ρ of
+    case toSExprMaybe smap ρ of
         Just ty -> do
             (SMTSolver proc) <- getHas `debug` ("found bound " ++ show i ++ " : " ++ show ρ)
-            liftIO $ SimpleSMT.declare proc ("L" ++ show i) ty
+            liftIO $ SMT.declare proc ("L" ++ show i) ty
             return ()
         Nothing -> return ()
 
-    τ' <- typeOf (subst 0 (Free (Local i)) ρ') VStar
+    τ' <- typeOf (subst 0 (Free (Local i)) ρ') VStarT
     (ConstrList cs) <- getConstrList
     σ <- unifyConstraintsFull cs [] False M.empty -- `debug` ("\n\ncs1 (elabType Π): " ++ show cs)
     let τ'' = substMetas σ τ'
     checkDoesNotContainMetas "here??" τ''
 
-    return (Π τ (bind 0 i τ''), VStar) -- `debug` ("i after: " ++ show i') -- 
+    return (Π n τ (bind 0 i τ''), VStarT) -- `debug` ("i after: " ++ show i') -- 
         -- `debug` ("\n\ngot: " ++ show (Π ρ ρ') ++ " with fresh L" ++ show i ++ ", after subst: " ++ show (subst 0 (Free (Local i)) ρ') ++ " returning: " ++ show (Π τ (bind 0 i τ')))
 elabType (IΠ ρ ρ') = do
-    (Π τ τ', τ'') <- elabType (Π ρ ρ')
+    (Π _ τ τ', τ'') <- elabType (Π Nothing ρ ρ')
     return (IΠ τ τ', τ'')
 elabType (x :⇒: y) = do
-    x' <- typeOf x VProp 
-    y' <- typeOf y VStar 
+    x' <- typeOf x VPropT 
+    y' <- typeOf y VStarT 
     (ConstrList cs) <- getConstrList
     σ <- unifyConstraintsFull cs [] False M.empty -- `debug` ("\n\nconstraints: " ++ show cs)
     let x'' = substMetas σ x'
     let y'' = substMetas σ y'
     checkDoesNotContainMetas "here1" y'' `debug` ("\n\n:⇒: " ++ show x')
-    return (x :⇒: y'', VStar)
+    return (x :⇒: y'', VStarT)
 elabType (H n) = do
     -- mi <- getFreshAndIncrementMeta
     -- let mvar = Free (Meta mi)
@@ -396,9 +447,9 @@ elabTypeApp ty [] = case ty of
         addToΓ (Meta mi) τ
         (xs',τ'') <- elabTypeApp (τ' (eval mvar [])) []
         return $ (I mvar:xs',τ'')
-    (VΠ _ _) -> throwError $ "illegal application at " <> (toS $ show ty)
+    (VΠ _ _ _) -> throwError $ "illegal application at " <> (toS $ show ty)
     (VSArr cnstr τ') -> do
-        cnstr' <- typeOf (quote0 cnstr) VProp
+        cnstr' <- typeOf (quote0 cnstr) VPropT
         (ConstrList cs) <- getConstrList 
         pure () `debug` ("\n\nConstrList is: "++ show cs)
         -- σ <- unifyConstraints cs [] False M.empty
@@ -407,7 +458,7 @@ elabTypeApp ty [] = case ty of
         elabTypeApp τ' [] `debug` ("\n\nconstraint is: "++ show cnstr'')
     _ -> return ([], ty)
 elabTypeApp ty (x:xs) = case (x,ty) of
-    (E x', VΠ τ τ') -> do
+    (E x', VΠ _ τ τ') -> do
         x'' <- typeOf x' τ
         (ConstrList cs) <- getConstrList
         (xs',τ'') <- elabTypeApp (τ' (eval x'' [])) (fmap (fmap $ substMetas $ mkMap cs) xs) -- `debug` ("sbustmetas: " ++ show cs)
@@ -424,7 +475,7 @@ elabTypeApp ty (x:xs) = case (x,ty) of
         (xs',τ'') <- elabTypeApp (τ' (eval mvar [])) (x:xs) -- `debug` ("adding meta: " ++ show (VIΠ τ τ') ++ " -> " ++ show (τ' (eval (Free (Global "aaa")) [])))
         return $ (I mvar:xs',τ'')
     (_, VSArr cnstr τ') -> do
-        cnstr' <- typeOf (quote0 cnstr) VProp
+        cnstr' <- typeOf (quote0 cnstr) VPropT
         (ConstrList cs) <- getConstrList 
         pure () `debug` ("\n\nConstrList is: "++ show cs)
         -- σ <- unifyConstraints cs [] False M.empty
@@ -467,7 +518,8 @@ unifyType (x :@: xs) (y :@: ys)
         unifyTypeApp (E x,E y) = unifyType x y
         unifyTypeApp (I x,I y) = unifyType x y
         unifyTypeApp _ = error "trying to unify E with I"
-unifyType (Set x) (Set y) = unifyType x y
+unifyType (SetT x) (SetT y) = unifyType x y
+unifyType (MkSet a _) (MkSet b _) = unifyType a b
 
 unifyType (H n) x = [(H n, x)]
 unifyType x (H n) = [(H n, x)]
@@ -504,13 +556,13 @@ unifyConstraints ((M x, y):xs)                       acc flag  m
         Just tx -> unifyConstraints xs ((tx, y):acc) flag m `debug` ("unify oterwise : " ++ show (M x, y))
         Nothing -> unifyConstraints xs ((M x, y):acc) flag m 
 unifyConstraints ((x, M y):xs)                       acc flag  m = unifyConstraints ((M y,x):xs) acc flag m
-unifyConstraints ((Star, Star):xs)                   acc flag  m = unifyConstraints xs acc flag m
-unifyConstraints ((Name, Name):xs)                   acc flag  m = unifyConstraints xs acc flag m
+unifyConstraints ((StarT, StarT):xs)                   acc flag  m = unifyConstraints xs acc flag m
+unifyConstraints ((NameT, NameT):xs)                   acc flag  m = unifyConstraints xs acc flag m
 unifyConstraints ((MkName x, MkName y):xs)           acc flag  m | x == y = unifyConstraints xs acc flag m
-unifyConstraints ((Set x, Set y):xs)                 acc flag  m = unifyConstraints ((x,y):xs) acc flag m
+unifyConstraints ((SetT x, SetT y):xs)                 acc flag  m = unifyConstraints ((x,y):xs) acc flag m
 unifyConstraints ((x@(MkSet _ _), y@(MkSet _ _)):xs) acc flag  m | x == y = unifyConstraints xs acc flag m
 
-unifyConstraints ((Π σ σ', Π τ τ'):xs)               acc flag  m = throwError "not sure how to unify yet"
+unifyConstraints ((Π _ σ σ', Π _ τ τ'):xs)           acc flag  m = throwError "not sure how to unify yet"
 unifyConstraints ((IΠ σ σ', IΠ τ τ'):xs)             acc flag  m = throwError "not sure how to unify yet"
 unifyConstraints ((Free x, Free y):xs)               acc flag  m | x == y = unifyConstraints xs acc flag m
 unifyConstraints ((Bound x, Bound y):xs)             acc flag  m | x == y = unifyConstraints xs acc flag m
@@ -539,10 +591,10 @@ unifyConstraintsPart ts1 ts2 f m = flip runReaderT Partial $ unifyConstraints ts
 doesNotContainMetas :: Term -> Bool
 -- doesNotContainMetas InferM = False
 doesNotContainMetas (M _) = False
-doesNotContainMetas (Set a) = doesNotContainMetas a
+doesNotContainMetas (SetT a) = doesNotContainMetas a
 doesNotContainMetas (MkSet a xs) = doesNotContainMetas a && foldr (\t b -> doesNotContainMetas t && b) True xs
-doesNotContainMetas (Π τ τ') = doesNotContainMetas τ && doesNotContainMetas τ'
-doesNotContainMetas (IΠ τ τ') = doesNotContainMetas (Π τ τ')
+doesNotContainMetas (Π _ τ τ') = doesNotContainMetas τ && doesNotContainMetas τ'
+doesNotContainMetas (IΠ τ τ') = doesNotContainMetas (Π Nothing τ τ')
 doesNotContainMetas (e :@: es) = doesNotContainMetas e && foldr doesNotContainMetasApp True es
     where
         doesNotContainMetasApp _ False = False
@@ -588,7 +640,7 @@ mkMap (_:xs) = mkMap xs
 
 newtype SATDefs = SATDefs { unSATDefs :: Set Int } deriving (Eq, Show)
 
-newtype SMTSolver = SMTSolver { unSMTSolver :: SimpleSMT.Solver }
+newtype SMTSolver = SMTSolver { unSMTSolver :: SMT.Solver }
 
 getHas :: (Has a s, MonadState s m) => m a
 getHas = getter <$> get
@@ -599,49 +651,59 @@ addToSATDefs i = modify (\s -> modifier (\(SATDefs ys) -> SATDefs $ S.insert i y
 
 
 -- using this to only define bound vars that have a SAT representation
-toSExprMaybe :: Term -> Maybe SimpleSMT.SExpr
-toSExprMaybe Prop = pure $ SimpleSMT.tBool
-toSExprMaybe Name = pure $ SimpleSMT.const "String"
-toSExprMaybe (MkName s) = pure $ SimpleSMT.const $ "\"" ++ toS s ++ "\""
-toSExprMaybe (Set a) = (\x -> SimpleSMT.fun "Set" [x]) <$> toSExprMaybe a
-toSExprMaybe (MkSet a []) = 
-    (\x -> SimpleSMT.fun "as" [SimpleSMT.const "emptyset", x]) <$> toSExprMaybe (Set a)
-toSExprMaybe (MkSet _ [x]) = do
-    x' <- toSExprMaybe x
-    return $ SimpleSMT.fun "singleton" [x']
-toSExprMaybe (MkSet _ (x:xs)) = do
-    x' <- toSExprMaybe x
-    xs' <- mapM toSExprMaybe xs
-    return $ SimpleSMT.fun "insert" $ xs' ++ [SimpleSMT.fun "singleton" [x']]
-toSExprMaybe (M x) = pure $ SimpleSMT.const $ "M" ++ show x
--- toSExprMaybe (L i) = pure $ SimpleSMT.const $ "L"++ show i
--- toSExprMaybe (C "¬" :@: [E x]) = SimpleSMT.not <$> toSExprMaybe x
--- toSExprMaybe (C "&&" :@: [E x, E y]) = SimpleSMT.and <$> toSExprMaybe x <*> toSExprMaybe y
--- toSExprMaybe (C "∈" :@: [_, E x, E s]) = (\a b -> SimpleSMT.fun "member" [a,b]) <$> toSExprMaybe x <*> toSExprMaybe s
--- toSExprMaybe (C "∉" :@: [_, E x, E s]) = (\a b -> SimpleSMT.not $ SimpleSMT.fun "member" [a,b]) <$> toSExprMaybe x <*> toSExprMaybe s
--- toSExprMaybe (C "\\\\" :@: [_, E s, E x]) = (\a b -> SimpleSMT.fun "setminus" [a, SimpleSMT.fun "singleton" [b]]) <$> toSExprMaybe s <*> toSExprMaybe x
--- toSExprMaybe (C "≡" :@: [_, E x, E y]) = SimpleSMT.eq <$> toSExprMaybe x <*> toSExprMaybe y
--- toSExprMaybe (C "∪" :@: [_, E x, E y]) = (\a b -> SimpleSMT.fun "union" [a,b]) <$> toSExprMaybe x <*> toSExprMaybe y
--- toSExprMaybe (C "∩" :@: [_, E x, E y]) = (\a b -> SimpleSMT.fun "intersection" [a,b]) <$> toSExprMaybe x <*> toSExprMaybe y
--- toSExprMaybe (C "\\" :@: [_, E x, E y]) = (\a b -> SimpleSMT.fun "setminus" [a,b]) <$> toSExprMaybe x <*> toSExprMaybe y
--- toSExprMaybe (C "singleton" :@: [_, E x]) = (\a -> SimpleSMT.fun "singleton" [a]) <$> toSExprMaybe x
--- toSExprMaybe (C "infer" :@: [_, E x]) = SimpleSMT.eq <$> toSExprMaybe x <*> toSExprMaybe x -- vacuous, but forces x to be declared, if it is a meta var
-toSExprMaybe _ = Nothing
+toSExprMaybe :: Map Text (SExpr Text Int) -> Term -> Maybe SMT.SExpr
+toSExprMaybe _ PropT = pure $ SMT.tBool
+toSExprMaybe _ NameT = pure $ SMT.const "String"
+toSExprMaybe _ (MkName s) = pure $ SMT.const $ "\"" ++ toS s ++ "\""
+toSExprMaybe smap (SetT a) = (\x -> SMT.fun "Set" [x]) <$> toSExprMaybe smap a
+toSExprMaybe smap (MkSet a []) = 
+    (\x -> SMT.fun "as" [SMT.const "emptyset", x]) <$> toSExprMaybe smap (SetT a)
+toSExprMaybe smap (MkSet _ [x]) = do
+    x' <- toSExprMaybe smap x
+    return $ SMT.fun "singleton" [x']
+toSExprMaybe smap (MkSet _ (x:xs)) = do
+    x' <- toSExprMaybe smap x
+    xs' <- mapM (toSExprMaybe smap) xs
+    return $ SMT.fun "insert" $ xs' ++ [SMT.fun "singleton" [x']]
+toSExprMaybe _ (M x) = pure $ SMT.const $ "M" ++ show x
+toSExprMaybe smap t@(C op :@: args) = 
+    case M.lookup op smap of
+        Just sexp -> substSExpr smap t (map unExplImpl args) sexp
+        Nothing -> Nothing
+    
+    where
+        substSExpr :: Map Text (SExpr Text Int) -> Term -> [Term] -> SExpr Text Int -> Maybe SMT.SExpr
+        substSExpr _ _ _ (NAtom x) = return $ SMT.Atom (toS x)
+        substSExpr smap trm ts (VAtom i)
+            | 0 <= i && i < length ts = toSExprMaybe smap (ts !! i)
+            | otherwise = Nothing
+        substSExpr smap trm ts (List xs) = SMT.List <$> 
+            mapM (substSExpr smap trm ts) xs
+        
+        unExplImpl :: ExplImpl a -> a
+        unExplImpl (I a) = a
+        unExplImpl (E a) = a
+
+-- toSExprMaybe _ (L i) = return $ SMT.const $ "L"++ show i
+
+toSExprMaybe _ _ = Nothing
 
 
 -- TODO replace this with toSExprMaybe + a suitable error message??
 
-toSExpr :: Map Text (SExpr Text Int) -> Term -> SimpleSMT.SExpr
-toSExpr _ Prop = SimpleSMT.tBool
-toSExpr _ Name = SimpleSMT.const "String"
-toSExpr smap (MkName s) = SimpleSMT.const $ "\"" ++ toS s ++ "\""
-toSExpr smap (Set a) = SimpleSMT.fun "Set" [toSExpr smap a]
+toSExpr :: Map Text (SExpr Text Int) -> Term -> SMT.SExpr
+toSExpr _ PropT = SMT.tBool
+toSExpr _ NameT = SMT.const "String"
+toSExpr smap (MkName s) = SMT.const $ "\"" ++ toS s ++ "\""
+toSExpr _ IntT = SMT.const "Int"
+toSExpr smap (MkInt i) = SMT.const $ show i
+toSExpr smap (SetT a) = SMT.fun "Set" [toSExpr smap a]
 toSExpr smap (MkSet a []) = 
-    SimpleSMT.fun "as" [SimpleSMT.const "emptyset", toSExpr smap (Set a)]
-toSExpr smap (MkSet _ [x]) = SimpleSMT.fun "singleton" [toSExpr smap x]
+    SMT.fun "as" [SMT.const "emptyset", toSExpr smap (SetT a)]
+toSExpr smap (MkSet _ [x]) = SMT.fun "singleton" [toSExpr smap x]
 toSExpr smap (MkSet _ (x:xs)) = 
-    SimpleSMT.fun "insert" $ map (toSExpr smap) xs ++ [SimpleSMT.fun "singleton" [toSExpr smap x]]
-toSExpr _ (M x) = SimpleSMT.const $ "M" ++ show x
+    SMT.fun "insert" $ map (toSExpr smap) xs ++ [SMT.fun "singleton" [toSExpr smap x]]
+toSExpr _ (M x) = SMT.const $ "M" ++ show x
 
 toSExpr smap t@(C op :@: args) = 
     case M.lookup op smap of
@@ -649,56 +711,33 @@ toSExpr smap t@(C op :@: args) =
         Nothing -> error $ "operation not found " ++ toS op
     
     where
-        substSExpr :: Map Text (SExpr Text Int) -> Term -> [Term] -> SExpr Text Int -> SimpleSMT.SExpr
-        substSExpr _ _ _ (NAtom x) = SimpleSMT.Atom (toS x)
+        substSExpr :: Map Text (SExpr Text Int) -> Term -> [Term] -> SExpr Text Int -> SMT.SExpr
+        substSExpr _ _ _ (NAtom x) = SMT.Atom (toS x)
         substSExpr smap trm ts (VAtom i)
             | 0 <= i && i < length ts = toSExpr smap (ts !! i)
             | otherwise = error  $ "index out of range in " ++ show trm
-        substSExpr smap trm ts (List xs) = SimpleSMT.List $ 
+        substSExpr smap trm ts (List xs) = SMT.List $ 
             map (substSExpr smap trm ts) xs
         
         unExplImpl :: ExplImpl a -> a
         unExplImpl (I a) = a
         unExplImpl (E a) = a
-     
 
--- toSExpr (C "¬" :@: [E x]) = SimpleSMT.not $ toSExpr x
--- toSExpr (C "&&" :@: [E x, E y]) = SimpleSMT.and (toSExpr x) (toSExpr y)
--- toSExpr (C "∈" :@: [_, E x, E s]) = SimpleSMT.fun "member" [toSExpr x, toSExpr s]
--- toSExpr (C "∉" :@: [_, E x, E s]) = SimpleSMT.not $ SimpleSMT.fun "member" [toSExpr x, toSExpr s]
--- toSExpr (C "\\\\" :@: [_, E s, E x]) = SimpleSMT.fun "setminus" [toSExpr s, SimpleSMT.fun "singleton" [toSExpr x]]
--- toSExpr (C "≡" :@: [_, E x, E y]) = SimpleSMT.eq (toSExpr x) (toSExpr y)
--- toSExpr (C "∪" :@: [_, E x, E y]) = SimpleSMT.fun "union" [toSExpr x, toSExpr y]
--- toSExpr (C "∩" :@: [_, E x, E y]) = SimpleSMT.fun "intersection" [toSExpr x, toSExpr y]
--- toSExpr (C "\\" :@: [_, E x, E y]) = SimpleSMT.fun "setminus" [toSExpr x, toSExpr y]
--- toSExpr (C "singleton" :@: [_, E x]) = SimpleSMT.fun "singleton" [toSExpr x]
--- toSExpr (C "infer" :@: [_, E x]) = SimpleSMT.eq (toSExpr x) (toSExpr x) -- vacuous, but forces x to be declared, if it is a meta var
-toSExpr _ (L i) = SimpleSMT.const $ "L"++ show i
+toSExpr _ (L i) = SMT.const $ "L"++ show i
 
 toSExpr _ e = error $ "unsupported operation " ++ show e
 
  
 
-fromSExpr :: SimpleSMT.SExpr -> Type -> Term
-fromSExpr (SimpleSMT.Atom xs) VName = MkName $ toS $ filter (/= '"') xs
-fromSExpr (SimpleSMT.List [SimpleSMT.Atom "as",SimpleSMT.Atom "emptyset",_]) (VSet a) = MkSet (quote0 a) []
-fromSExpr (SimpleSMT.List [SimpleSMT.Atom "singleton",n])          (VSet a) = MkSet (quote0 a) [fromSExpr n a]
-fromSExpr (SimpleSMT.List [SimpleSMT.Atom "union", xs, ys])        (VSet a) = 
-    let (MkSet a' xs') = fromSExpr xs (VSet a)
-        (MkSet _ ys') = fromSExpr ys (VSet a) in
+fromSExpr :: SMT.SExpr -> Type -> Term
+fromSExpr (SMT.Atom xs) VNameT = MkName $ toS $ filter (/= '"') xs
+fromSExpr (SMT.Atom i) VIntT = MkInt $ read i
+fromSExpr (SMT.List [SMT.Atom "as",SMT.Atom "emptyset",_]) (VSetT a) = MkSet (quote0 a) []
+fromSExpr (SMT.List [SMT.Atom "singleton",n])          (VSetT a) = MkSet (quote0 a) [fromSExpr n a]
+fromSExpr (SMT.List [SMT.Atom "union", xs, ys])        (VSetT a) = 
+    let (MkSet a' xs') = fromSExpr xs (VSetT a)
+        (MkSet _ ys') = fromSExpr ys (VSetT a) in
         MkSet a' $ xs' ++ ys'
-
-
--- toSExpr (Set a) = SimpleSMT.fun "Set" [toSExpr a]
--- toSExpr (MkSet a []) = 
---     SimpleSMT.fun "as" [SimpleSMT.const "emptyset", toSExpr (Set a)]
--- toSExpr (MkSet _ (x:xs)) = 
---     SimpleSMT.fun "insert" $ map toSExpr xs ++ [SimpleSMT.fun "singleton" [toSExpr x]]
--- toSExpr (M x) = SimpleSMT.const $ "M" ++ show x
--- toSExpr (C "∈" :@: [_, E x, E s]) = SimpleSMT.fun "member" [toSExpr x, toSExpr s]
--- toSExpr (C "\\\\" :@: [_, E s, E x]) = SimpleSMT.fun "setminus" [toSExpr s, SimpleSMT.fun "singleton" [toSExpr x]]
--- toSExpr (C "≡" :@: [_, E x, E y]) = SimpleSMT.eq (toSExpr x) (toSExpr y)
--- toSExpr _ = error "unsupported operation"
 
 
 
@@ -710,7 +749,18 @@ defineMetas (M n) = do
         τ <- lookupInΓ (Meta n)
         smap <- getSExprMap
         (SMTSolver proc) <- getHas `debug` ("found meta " ++ show n ++ " : " ++ show τ)
-        liftIO $ SimpleSMT.declare proc ("M" ++ show n) (toSExpr smap $ quote0 τ)
+
+
+        -- liftIO $ SMT.declare proc ("M" ++ show n) (toSExpr smap $ quote0 τ)
+
+        -- using this to only define bound vars that have a SAT representation
+        case toSExprMaybe smap $ quote0 τ of
+            Just ty -> do
+                (SMTSolver proc) <- getHas `debug` ("found meta " ++ show n ++ " : " ++ show τ)
+                liftIO $ SMT.declare proc ("M" ++ show n) ty
+                return ()
+            Nothing -> return ()
+
         addToSATDefs n
     else pure ()
 defineMetas (e :@: es) = mapM_ (\x -> case x of
@@ -718,9 +768,9 @@ defineMetas (e :@: es) = mapM_ (\x -> case x of
     I y -> defineMetas y) es
 defineMetas _ = return ()
 
-checkSat :: (Has Γ s, Has ConstrList s, Has SATConstrList s, Has SATDefs s,
+checkSMT :: (Has Γ s, Has ConstrList s, Has SATConstrList s, Has SATDefs s,
     MonadState s m , Has SMTSolver s, MonadIO m, MonadError String m) => Term -> m ()
-checkSat trm = do
+checkSMT trm = do
     (ConstrList cs) <- getConstrList
     -- get collected sat constraints and replace all equal metas, collected in ConstrList
     (SATConstrList satcs) <- getSATConstrList
@@ -730,24 +780,24 @@ checkSat trm = do
     mapM_ defineMetas satcs'
     (SMTSolver proc) <- getHas `debug` ("produced following sat goals: " ++ show satcs')
     smap <- getSExprMap
-    -- mapM_ (\s -> liftIO $ SimpleSMT.assert proc $ toSExpr smap s) satcs'
-    mapM_ (\(s,i) -> liftIO $ SimpleSMT.assert proc $ SimpleSMT.named ('_':show i) $ toSExpr smap s) (zip satcs' [0..])
+    -- mapM_ (\s -> liftIO $ SMT.assert proc $ toSExpr smap s) satcs'
+    mapM_ (\(s,i) -> liftIO $ SMT.assert proc $ SMT.named ('_':show i) $ toSExpr smap s) (zip satcs' [0..])
 
     -- check sat
 
     (SMTSolver proc) <- getHas
-    r <- liftIO $ SimpleSMT.check proc
+    r <- liftIO $ SMT.check proc
     case r of
-        SimpleSMT.Sat -> do
+        SMT.Sat -> do
             (SATDefs defined) <- getHas
             forM_ (S.toList defined) (\d -> do
-                (SimpleSMT.Other v) <- liftIO $ SimpleSMT.getExpr proc (SimpleSMT.const $ "M" ++ show d)
+                (SMT.Other v) <- liftIO $ SMT.getExpr proc (SMT.const $ "M" ++ show d)
                 τ <- lookupInΓ (Meta d) `debug` ("\n\nSMT returned: " ++ show v)
                 let vt = fromSExpr v τ 
                 addToConstrList $ ConstrList [(M d,vt)] `debug` ("\n\nadding const: " ++ show (M d,vt)))
-        SimpleSMT.Unsat -> do 
-            (SimpleSMT.List res) <- liftIO $ SimpleSMT.command proc (SimpleSMT.List [ SimpleSMT.Atom "get-unsat-core" ])
-            let unsat_core = map (\(SimpleSMT.Atom (_:num)) -> (read num :: Int)) res
+        SMT.Unsat -> do 
+            (SMT.List res) <- liftIO $ SMT.command proc (SMT.List [ SMT.Atom "get-unsat-core" ])
+            let unsat_core = map (\(SMT.Atom (_:num)) -> (read num :: Int)) res
             σ <- unifyConstraintsPart cs [] False M.empty -- `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
             
             throwError $ "The following constraints are unsatisfiable:\n" ++
@@ -763,7 +813,7 @@ elabType0 ::  (Has BVCounter s, Has MetaCounter s, Has Γ s, Has ConstrList s, H
 elabType0 canContainMetas t = do 
     (trm,typ) <- elabType t
 
-    checkSat trm
+    checkSMT trm
 
     (ConstrList cs') <- getConstrList -- `debug` "stopped SMT"
     σ <- unifyConstraintsFull cs' [] False M.empty -- `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
@@ -784,10 +834,10 @@ elabType0' trm ty = do
     (ty',_) <- elabType ty
     trm' <- typeOf trm (eval ty' [])
 
-    checkSat trm
+    checkSMT trm
     -- get model and add to cs
 
-    -- liftIO $ SimpleSMT.stop proc
+    -- liftIO $ SMT.stop proc
     (ConstrList cs') <- getConstrList -- `debug` "stopped SMT"
     σ <- unifyConstraintsFull cs' [] False M.empty -- `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
     let trm'' = substMetas σ trm'
@@ -811,32 +861,118 @@ getHoles (_:xs) = getHoles xs
 --     smt <- initSMT
 
 --     res <- runExceptT $ (flip (evalStateT @(ExceptT String IO)) (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt)) $ elabType0 canContainMetas t
---     liftIO $ SimpleSMT.stop smt
+--     liftIO $ SMT.stop smt
 --     return res
 
-initSMT :: MonadIO m => m SimpleSMT.Solver
+
+-- | Start a new solver process.
+newSolver :: String       {- ^ Executable -}            ->
+             [String]     {- ^ Arguments -}             ->
+             Maybe SMT.Logger {- ^ SMTOptional logging here -} ->
+             IO SMT.Solver
+newSolver exe opts mbLog =
+  do (hIn, hOut, hErr, h) <- runInteractiveProcess exe opts Nothing Nothing
+
+     let info lvl a = case mbLog of
+                    Nothing -> return ()
+                    Just log  -> case lvl of
+                        Just i -> SMT.logMessageAt log i a
+                        Nothing -> SMT.logMessage log a
+
+     _ <- forkIO $ forever (do errs <- hGetLine hErr
+                               info (Just 1) ("[stderr] " ++ errs))
+                    `X.catch` \X.SomeException {} -> return ()
+
+     getResponse <-
+       do txt <- hGetContents hOut                  -- Read *all* output
+          ref <- newIORef (unfoldr SMT.readSExpr txt)  -- Parse, and store result
+          return $ atomicModifyIORef ref $ \xs ->
+                      case xs of
+                        []     -> (xs, Nothing)
+                        y : ys -> (ys, Just y)
+
+     let cmd c = do let txt = SMT.showsSExpr c ""
+                    info Nothing ("[send->] " ++ txt)
+                    hPutStrLn hIn txt
+                    hFlush hIn
+
+         command c =
+           do cmd c
+              mb <- getResponse
+              case mb of
+                Just res -> do case res of
+                                 SMT.List (SMT.Atom "error":_) -> 
+                                    info (Just 1) ("[<-recv] " ++ SMT.showsSExpr res "")
+                                 _ -> 
+                                    info Nothing ("[<-recv] " ++ SMT.showsSExpr res "")
+                               return res
+                Nothing  -> fail "Missing response from solver"
+
+         stop =
+           do cmd (SMT.List [SMT.Atom "exit"])
+              ec <- waitForProcess h
+              X.catch (do hClose hIn
+                          hClose hOut
+                          hClose hErr)
+                      (\ex -> info (Just 1) (show (ex::X.IOException)))
+              return ec
+
+         solver = SMT.Solver { .. }
+
+     SMT.setOption solver ":print-success" "true"
+     SMT.setOption solver ":produce-models" "true"
+
+     return solver
+
+smtSMTOptIsDefined :: (Has Γ s, MonadReader s m) => Text -> m Bool
+smtSMTOptIsDefined opt = do
+    Γ{..} <- getter <$> ask
+
+    return $ findSMTOpt opt smtOpts
+
+    where
+        findSMTOpt :: Text -> [SMT.SExpr] -> Bool
+        findSMTOpt _ [] = False
+        findSMTOpt opt (SMT.List (SMT.Atom "set-option":SMT.Atom opt':_):xs)
+            | opt == toS opt' = True
+            | otherwise = findSMTOpt opt xs
+        findSMTOpt "set-logic" (SMT.List (SMT.Atom "set-logic":_):xs) = True
+        findSMTOpt opt (_:xs) = findSMTOpt opt xs
+
+
+
+initSMT :: (MonadIO m , Has Γ s, MonadReader s m, MonadError String m) => m SMT.Solver
 initSMT = do
-    log <- liftIO $ SimpleSMT.newLogger 0
-    smt <- liftIO $ SimpleSMT.newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (if debugMode then Just log else Nothing)
-    liftIO $ SimpleSMT.setLogic smt "QF_UFSLIAFS" -- "QF_UFLIAFS"
-    liftIO $ SimpleSMT.setOption smt ":produce-unsat-cores" "true"
+    Γ{..} <- getter <$> ask
+    log <- liftIO $ SMT.newLogger smtLogLevel
+    smt <- liftIO $ newSolver "cvc4" ["--incremental", "--lang" , "smt2.0"] (if smtLogEnabled then Just log else Nothing)
+    setLogic <- smtSMTOptIsDefined "set-logic"
+    unless setLogic $ 
+        liftIO $ SMT.setLogic smt "QF_UFSLIAFS" -- "QF_UFLIAFS"
+    
+    produceUnsatCores <- smtSMTOptIsDefined ":produce-unsat-cores"
+    unless produceUnsatCores $ 
+        liftIO $ SMT.setOption smt ":produce-unsat-cores" "true"
+    
+    forM_ smtOpts (\x -> liftIO $ SMT.ackCommand smt x)
+
     return smt
 
 
 runElabType0' :: (MonadIO m, MonadError String m) => Bool -> Γ -> Term -> m (Term, Type)
 runElabType0' canContainMetas g t = do
-    smt <- initSMT
+    smt <- runReaderT initSMT g
 
     res <- (flip evalStateT (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt)) $ elabType0 canContainMetas t
-    liftIO $ SimpleSMT.stop smt
+    liftIO $ SMT.stop smt
     return res
 
 runElabType0List :: (MonadIO m, MonadError String m) => Γ -> Term -> Term -> m (Term, Type)
 runElabType0List g trm ty = do
-    smt <- initSMT
+    smt <- runReaderT initSMT g
 
     res <- (flip (evalStateT ) (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt)) $ elabType0' trm ty
-    liftIO $ SimpleSMT.stop smt
+    liftIO $ SMT.stop smt
     return res
 
 
@@ -849,10 +985,10 @@ typeOf0 t τ = do
     trm <- typeOf t τ
     (ConstrList cs) <- getConstrList
 
-    checkSat trm
+    checkSMT trm
     -- get model and add to cs
 
-    -- liftIO $ SimpleSMT.stop proc
+    -- liftIO $ SMT.stop proc
     (ConstrList cs') <- getConstrList -- `debug` "stopped SMT in typeOf0"
     σ <- unifyConstraintsFull cs' [] False M.empty --`debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
     let trm' = substMetas σ trm
@@ -875,34 +1011,65 @@ typeOf0 t τ = do
 
 evalTypeOf0 :: (MonadError String m, MonadIO m) => Γ -> Term -> Type -> m Term
 evalTypeOf0 g t τ = do
-    smt <- initSMT
+    smt <- runReaderT initSMT g
 
     res <- flip evalStateT (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt) $ typeOf0 t τ
 
-    liftIO $ SimpleSMT.stop smt
+    liftIO $ SMT.stop smt
     return res
 
 
 data SExpr n v = NAtom n
              | VAtom v
              | List [SExpr n v]
-    deriving (Show, Eq, Data)
+    deriving (Eq, Data)
+
+instance {-# OVERLAPPING #-} (Show v) => Show (SExpr Text v) where
+    show (NAtom n) = "'" ++ toS n
+    show (VAtom i) =  show i
+    show (List xs) = "(" ++ (intercalate " " $ map show xs) ++ ")" 
+
+instance (Show n, Show v) => Show (SExpr n v) where
+    show (NAtom n) = show n
+    show (VAtom i) =  show i
+    show (List xs) = "(" ++ (intercalate " " $ map show xs) ++ ")" 
+
 
 instance Bifunctor SExpr where
     bimap f g (NAtom n) = NAtom $ f n
     bimap f g (VAtom v) = VAtom $ g v
     bimap f g (List xs) = List $ map (bimap f g) xs
 
-deriving instance Data SimpleSMT.SExpr
+deriving instance Data SMT.SExpr
+
+data SMTOpt name = 
+    SMTCmd (LamPi.SExpr name name)
+  | SMTLogLevel Int
+  | SMTLogEnabled Bool
+    deriving (Show, Eq, Data, Typeable)
+
+data DataOpt = None | LiftToSMT
+     deriving (Show, Eq, Data, Typeable)
+
+
+
+instance Functor SMTOpt where
+    fmap f (SMTCmd sexp) = SMTCmd (bimap f f sexp)
+    fmap f (SMTLogLevel i) = SMTLogLevel i
+    fmap f (SMTLogEnabled i) = SMTLogEnabled i
 
 data Decl = 
-    Data Text Term [(Text, Term)]  
+    Data DataOpt Text Term [(Text, Maybe Text, Term)]  
   | Def Text (Maybe Term) Term
   | PropDef Text Term (SExpr Text Int)
+  | SMTOptDef (SMTOpt Text)
+  | Lang Text
+  | TranslateDef Text Text [(Term, Maybe Term, Text)]
+  | TranslateApp Text Text Text
     deriving (Show, Eq, Data)
 
 codom :: Term -> Term
-codom (Π _ ρ) = codom ρ
+codom (Π _ _ ρ) = codom ρ
 codom (IΠ _ ρ) = codom ρ
 codom (_ :⇒: ρ) = codom ρ
 codom x = x
@@ -934,40 +1101,185 @@ codom x = x
 --     unless (not mustBeAppC || c == c') $ throwError "type constructor for type D x1 ... xn should have type ... -> D x1' ... xn'"
 -- strictPositivityCheck mustBeAppC c _ = return ()
 
+upto :: Int -> [Int]
+upto 0 = []
+upto k = upto (k-1) ++ [k-1]
+
+liftToSMT :: (MonadIO m, MonadError String m) =>  Γ -> Text -> Term -> [(Text, Maybe Text, Term)] -> m Γ
+liftToSMT env nm ty tyConns = do
+    noOfParams <- params ty
+    conns <- mapM (mkCon ty) tyConns
+    let pars = [SMT.Atom ("t" ++ show i) | i <- upto noOfParams]
+        def = SMT.List [SMT.Atom "declare-datatypes", 
+                SMT.List [SMT.List [SMT.Atom (toS nm), SMT.Atom (show noOfParams) ]] ,
+                SMT.List [SMT.List [SMT.Atom "par", SMT.List pars, SMT.List conns ]]
+            ]
+    -- liftIO $ putStrLn $ SMT.showsSExpr def ""
+    -- liftIO $ putStrLn $ show nm ++ " : " ++ show ty
+
+    let env' = mkEnv env tyConns
+
+        sexp = List $ NAtom nm : (reverse [VAtom i | i <- upto noOfParams])
+    return env'{props = M.insert nm sexp (props env')}
+    where
+        params :: MonadError String m => Term -> m Int
+        params (Π _ _ trm) = (+1) <$> params trm
+        params (IΠ _ _) = throwError "Implicit parameters not allowed in lifted SMT defintions."
+        params (_ :⇒: _) = throwError "Synthesised parameters not allowed in lifted SMT defintions."
+        params (_) = return 0
+
+        mkCon ty (nm, nm', tyC) = do
+            -- liftIO $ putStrLn $ show tyC
+            -- liftIO $ putStrLn $ show $ mkConProp 0 tyC
+
+            tyC' <- mkConAux 0 ty tyC
+            case nm' of
+                Just nm'' -> return $ SMT.List (SMT.Atom (toS nm'') : tyC')
+                Nothing -> return $ SMT.List (SMT.Atom (toS nm) : tyC')
+
+        mkConAux i (Π _ ty trm) (IΠ ty' trmC)
+            | ty == ty' = mkConAux (i+1) trm trmC
+            | otherwise = throwError "the order of implicit parameters must be the same as the declared type signature when lifting to SMT"
+        mkConAux _ StarT (C _) = return []
+        mkConAux _ StarT (_ :@: _) = return []
+        mkConAux i StarT (Π (Just n) ty tys) = 
+            ((SMT.List [SMT.Atom (toS n), mkTy i ty]):) <$> mkConAux (i+1) StarT tys
+        mkConAux _ _ _ = throwError "Lifting of this type is not supported"
+
+        mkTy _ PropT = SMT.Atom "Bool"
+        mkTy _ NameT = SMT.Atom "String"
+        mkTy i (SetT a) = SMT.List [SMT.Atom "Set", mkTy i a]
+        mkTy _ IntT = SMT.Atom "Int"
+        mkTy i (x :@: args) = SMT.List (mkTy i x:mapApp args)
+            where
+                mapApp [] = []
+                mapApp (I _:xs) = mapApp xs
+                mapApp (E x:xs) = mkTy i x:mapApp xs
+        mkTy _ (C n) = SMT.Atom $ toS n
+        mkTy j (Bound i) = SMT.Atom $ ("t" ++ show (j - i - 1))
+        mkTy _ x = error $ show x ++ " unsupported"
+
+        mkTyProp :: Int -> Term -> SExpr Text Int
+        mkTyProp _ PropT = NAtom "Bool"
+        mkTyProp _ NameT = NAtom "String"
+        mkTyProp i (SetT a) = List [NAtom "Set", mkTyProp i a]
+        mkTyProp _ IntT = NAtom "Int"
+        
+        mkTyProp i (x :@: args) = List (mkTyProp i x:mapApp args)
+            where
+                mapApp [] = []
+                mapApp (I _:xs) = mapApp xs
+                mapApp (E x:xs) = mkTyProp i x:mapApp xs
+        mkTyProp _ (C n) = NAtom $ toS n
+        mkTyProp j (Bound i) = VAtom $ j - i - 1
+        mkTyProp _ x = error $ show x ++ " unsupported"
+
+        mkConProp :: Int -> Term -> [SExpr Text Int]
+        mkConProp i (IΠ _ tys) = mkConProp (i+1) tys
+        mkConProp i (Π _ ty tys) = List [NAtom "as", VAtom i, mkTyProp i ty] : mkConProp (i+1) tys 
+        mkConProp i x = [mkTyProp i x]
+
+        mkEnv env [] = env
+        mkEnv env@Γ{..} ((nm, nm', tyC):tys) = 
+            mkEnv env{props = M.insert nm (List [NAtom "as" ,List (NAtom (toS n):tyP), tyTyP]) props} tys            
+            where
+                (tyP, tyTyP) = (init $ mkConProp 0 tyC, last $ mkConProp 0 tyC)
+
+                n = case nm' of 
+                    Just nm'' -> nm''
+                    Nothing -> nm
+        -- data Term = StarT
+        --   | PropT
+        --   | NameT
+        --   | MkName Text
+        --   | SetT Term
+        --   | MkSet Term [Term]
+        --   | IntT
+        --   | MkInt Int
+        --   -- | RealT
+        --   -- | MkReal Int
+        --   | Π (Maybe Text) Term Term
+        --   | IΠ Term Term
+        --   | Term :⇒: Term
+        --   | Bound Int
+        --   | Free Name
+        --   | Term :@: [ExplImpl Term]
+        --   deriving (Ord, Data, Generic, ToJSON)
+
 
 defineDecl :: (MonadIO m, MonadError String m) => Bool -> Γ -> Decl -> m Γ 
-defineDecl ignoreCodom env@(Γ tys ps) (Data n t xs) = do
-    case M.lookup (Global n) tys of
+defineDecl ignoreCodom env@Γ{..} (Data opt n t xs) = do
+    case M.lookup (Global n) types of
         Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
         Nothing -> do
-            t' <- evalTypeOf0 env t VStar
+            t' <- evalTypeOf0 env t VStarT
             let τ = eval t' []
-            if ignoreCodom then pure () else unless (codom t == Star) $ throwError $ toS n ++ " data declaration should have type ... -> */Prop"
-            (Γ tys' _) <- defineTyCon (Γ (M.insert (Global n) τ tys) ps) n xs
-            return $ Γ (M.insert (Global n) τ $ tys' `M.union` tys) ps
+            if ignoreCodom then pure () else unless (codom t == StarT) $ throwError $ toS n ++ " data declaration should have type ... -> */Prop"
+            (Γ tys' _ _ _ _ _ _ _ _ _) <- defineTyCon env{types = M.insert (Global n) τ types} n xs
+            
+            env' <- if opt == LiftToSMT then do
+                liftToSMT env n t xs
+            else pure env
 
-defineDecl ignoreCodom env@(Γ tys ps) (PropDef n t sexp) = do
-    case M.lookup (Global n) tys of
+
+
+            return $ env'{
+                types = M.insert (Global n) τ $ tys' `M.union` types, 
+                constrs = M.insert (Global n) (S.fromList $ map (\(n,_,_) -> Global n) xs) constrs }
+
+defineDecl ignoreCodom env@Γ{..} (PropDef n t sexp) = do
+    case M.lookup (Global n) types of
         Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
         Nothing -> do
-            t' <- evalTypeOf0 env t VStar
+            t' <- evalTypeOf0 env t VStarT
             let τ = eval t' []
             -- if ignoreCodom then pure () else unless (codom t == Prop) $ throwError $ toS n ++ " data declaration should have type ... -> */Prop"
-            return $ Γ (M.insert (Global n) τ $ tys) (M.insert n sexp ps)
+            return $ env{types = M.insert (Global n) τ $ types, props = M.insert n sexp props}
+defineDecl _ env (SMTOptDef o) = defineSMTOpt env o
+defineDecl _ env@Γ{..} (Lang l) = 
+    if l `S.member` langs then throwError $ "language " ++ toS l ++ " already defined"
+        else return $ env{langs = S.insert l langs}
+defineDecl _ env@Γ{..} (TranslateDef n l cs) = do -- [(Term, Maybe Term, Text)]
+    unless (l `S.member` langs) $ throwError $ "language " ++ toS l ++ " has not been defined"
+    case M.lookup (Global n) constrs of
+        Just cs' -> do
+            env' <- defineTranslation env l cs
+            unless (S.fromList (map (\(trm,_,_) -> 
+                case trm of
+                    C n :@: _ -> Global n
+                    C n ->  Global n) cs) == cs') $ 
+                liftIO $ putStrLn $ "\n\n-------------------------------------------\n" ++
+                    "Warning: Patterns of " ++ toS n ++ " : " ++ toS l ++ " are incomplete." ++
+                    "\n-------------------------------------------\n\n"
+            return env'
+        Nothing -> throwError $ "Type " ++ toS n ++ " has not been defined."
+defineDecl _ env@Γ{..} (TranslateApp d l fp) = do
+    case M.lookup (Global d) defs of
+        Just (trm, ty) -> do
+            str <- translate env l trm (quote0 ty)
+            liftIO $ putStrLn $ "\n\n-------------------------------------------\n" ++ "output:\n" ++
+                toS str ++ "\n-------------------------------------------\n\n"
 
-defineDecl _ env@(Γ tys _) (Def n Nothing trm) = do
-    case M.lookup (Global n) tys of
-        Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
-        Nothing -> do
+        Nothing -> throwError $ "Def " ++ toS d ++ " does not exist."
+    return env
+
+defineDecl _ env@Γ{..} (Def n Nothing trm) = do
+    case (M.lookup (Global n) types, M.lookup (Global n) defs) of
+        (Just _, Just _) -> throwError $ "constant " ++ toS n ++ " already defined"
+        (Just _, Nothing) -> throwError $ "constant " ++ toS n ++ " already defined"
+        (Nothing, Just _) -> throwError $ "constant " ++ toS n ++ " already defined"
+        (Nothing, Nothing) -> do
             (t', τ) <- runElabType0' False env trm
-            liftIO $ putStrLn $ "-------------------------------------------\n" ++
+            liftIO $ putStrLn $ "\n\n-------------------------------------------\n" ++
                                 "Successfully elaborated\n" ++ show t' ++ " : " ++ show τ ++
-                                "\n-------------------------------------------"
-            return $ env
-defineDecl _ env@(Γ tys _) (Def n (Just ty) trm) = do
-    case M.lookup (Global n) tys of
-        Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
-        Nothing -> do
+                                "\n-------------------------------------------\n\n"
+            return $ env{defs = M.insert (Global n) (t', τ) defs}
+defineDecl _ env@Γ{..} (Def n (Just ty) trm) = do
+    case (M.lookup (Global n) types, M.lookup (Global n) defs) of
+        (Just _, Just _) -> throwError $ "constant " ++ toS n ++ " already defined"
+        (Just _, Nothing) -> throwError $ "constant " ++ toS n ++ " already defined"
+        (Nothing, Just _) -> throwError $ "constant " ++ toS n ++ " already defined"
+        (Nothing, Nothing) -> do
             (ty',_) <- runElabType0' True env ty
             pure ()  `debug` ("\nran elabType0 on ty and got: " ++ show ty')
             trm' <- evalTypeOf0 env trm (eval ty' [])
@@ -996,17 +1308,61 @@ defineDecl _ env@(Γ tys _) (Def n (Just ty) trm) = do
             -- let trm'' = substMetas σ trm'
             --     ty'' = substMetas σ ty'
 
-            liftIO $ putStrLn $ "-------------------------------------------\n" ++
+            liftIO $ putStrLn $ "\n\n-------------------------------------------\n" ++
                                 "Successfully elaborated\n" ++ show trm' ++ " : " ++ show ty'' ++
-                                "\n-------------------------------------------"
-            return $ env
+                                "\n-------------------------------------------\n\n"
+            return $ env{defs = M.insert (Global n) (trm', ty'') defs}
 
 
-defineTyCon :: (MonadIO m, MonadError String m) =>  Γ -> Text -> [(Text, Term)] -> m Γ 
-defineTyCon env@(Γ _ ps) _ [] = return $ Γ M.empty ps
-defineTyCon env@(Γ tys ps) n ((c, t):xs) = do
-    (Γ tys' _) <- defineTyCon env n xs
-    case M.lookup (Global c) (tys `M.union` tys') of
+
+defineSMTOpt env@Γ{..} (SMTCmd sexp) = return env{smtOpts = toSMTSExp sexp : smtOpts}
+    where
+        toSMTSExp :: SExpr Text Text -> SMT.SExpr
+        toSMTSExp (NAtom x) = SMT.Atom (toS x)
+        toSMTSExp (VAtom x) = SMT.Atom (toS x)
+        toSMTSExp (List xs) = SMT.List $ map toSMTSExp xs
+defineSMTOpt env@Γ{..} (SMTLogLevel i) = return env{smtLogLevel = i}
+defineSMTOpt env@Γ{..} (SMTLogEnabled b) = return env{smtLogEnabled = b}
+
+
+defineTranslation :: MonadError String m => Γ -> Text -> [(Term, Maybe Term, Text)] -> m Γ
+defineTranslation env _ [] = return env
+defineTranslation env@Γ{..} l ((x@(C n :@: args),typ,str):xs) =
+    case M.lookup (Global n) types of
+        Just trmTy -> do
+            unless (checkPattern (quote0 trmTy) args) $ throwError $ "The pattern " ++ show x ++ " is malformed."
+            argsT <- case typ of
+                Just (C nT :@: argsT) -> do
+                    case M.lookup (Global n) types of
+                        Just tyTy -> unless (checkPattern (quote0 tyTy) argsT) $ throwError $ "The pattern " ++ show x ++ " is malformed."
+                        Nothing -> throwError $ "The type " ++ show nT ++ " is not defined."
+                    return $ Just argsT
+                Just p -> throwError $ "The term " ++ show p ++ " is not a valid pattern."
+                Nothing -> return Nothing
+            defineTranslation env{translations = M.insert (l, Global n) (args, argsT, (T.replace "\\n" "\n" str)) translations} l xs
+        Nothing -> throwError $ "The constructor " ++ show n ++ " is not defined."
+defineTranslation env@Γ{..} l ((x@(C n),typ,str):xs) =
+    case M.lookup (Global n) types of
+        Just trmTy -> do
+            unless (checkPattern (quote0 trmTy) []) $ throwError $ "The pattern " ++ show x ++ " is malformed."
+            argsT <- case typ of
+                Just (C nT :@: argsT) -> do
+                    case M.lookup (Global n) types of
+                        Just tyTy -> unless (checkPattern (quote0 tyTy) argsT) $ throwError $ "The pattern " ++ show x ++ " is malformed."
+                        Nothing -> throwError $ "The type " ++ show nT ++ " is not defined."
+                    return $ Just argsT
+                Just p -> throwError $ "The term " ++ show p ++ " is not a valid pattern."
+                Nothing -> return Nothing
+            defineTranslation env{translations = M.insert (l, Global n) ([], argsT, (T.replace "\\n" "\n" str)) translations} l xs
+        Nothing -> throwError $ "The constructor " ++ show n ++ " is not defined."
+defineTranslation env@Γ{..} l (p:xs) = throwError $ "The term " ++ show p ++ " is not a valid pattern."
+
+
+defineTyCon :: (MonadIO m, MonadError String m) =>  Γ -> Text -> [(Text, Maybe Text, Term)] -> m Γ 
+defineTyCon env@Γ{..} _ [] = return $ env{types = M.empty}
+defineTyCon env@Γ{..} n ((c, _, t):xs) = do
+    (Γ tys' _ _ _ _ _ _ _ _ _) <- defineTyCon env n xs
+    case M.lookup (Global c) (types `M.union` tys') of
         Just _ -> throwError $ "constant " ++ toS c ++ " already defined"
         Nothing -> do
             case codom t of
@@ -1014,7 +1370,76 @@ defineTyCon env@(Γ tys ps) n ((c, t):xs) = do
                 (C c' :@: _) -> unless (c' == n) $ throwError $ "The constructor for type " ++ toS n ++ " ... , must be of the shape ... -> " ++ toS n ++ " ...\n instead found: " ++ show (codom t)
                 _ -> throwError $ "constructor " ++ show c ++ " : " ++ show t ++ " of incorrect shape"
             -- (t', τ) <- evalElabType0 g t
-            t' <- evalTypeOf0 env t VStar 
+            t' <- evalTypeOf0 env t VStarT
             -- strictPositivityCheck True n t
-            return $ Γ (M.insert (Global c) (eval t' []) tys') ps -- `debug` ("have " ++ show t ++ " found " ++ show t') 
+            return $ env{types = M.insert (Global c) (eval t' []) tys'} -- `debug` ("have " ++ show t ++ " found " ++ show t') 
+
+
+checkPattern :: Term -> [ExplImpl Term] -> Bool
+checkPattern (Π _ _ _) [] = False
+checkPattern (IΠ _ trm) [] = checkPattern trm []
+checkPattern (_ :⇒: trm) xs = checkPattern trm xs
+checkPattern (Π _ _ trm) (E (C x):xs) = checkPattern trm xs
+checkPattern (IΠ _ trm) (E (C x):xs) = checkPattern trm (E (C x):xs)
+checkPattern trm@(Π _ _ _) (I (C x):xs) = checkPattern trm xs
+checkPattern (IΠ _ trm) (I (C x):xs) = checkPattern trm xs
+checkPattern _ _ = True
+      
+
+translate :: (MonadIO m, MonadError String m) => Γ -> Text -> Term -> Term -> m Text
+translate _ l trm ty | l == "JSON" = return $ toS $ encode (trm, ty)
+translate _ _ (MkName n) NameT = return n
+translate env l (MkSet ty xs) (SetT _) = do
+    xs' <- mapM (\t -> translate env l t ty) xs
+    return $ "{" <> T.intercalate "," xs' <> "}"
+translate _ _ trm (Π _ _ _) = return $ toS $ show trm
+translate _ _ trm (IΠ _ _) = return $ toS $ show trm
+translate _ _ trm (_ :⇒: _) = return $ toS $ show trm
+translate env@Γ{..} l trm ty = do
+    (n, args, nTy, argsTy) <- case (trm, ty) of
+        (C n, C nTy) -> return (n, [], nTy, [])
+        (C n, C nTy :@: argsTy) -> return (n, [], nTy, argsTy)
+        (C n :@: args, C nTy) -> return (n, args, nTy, [])
+        (C n :@: args, C nTy :@: argsTy) -> return (n, args, nTy, argsTy)
+        _ -> throwError $ "Expected app in " ++ show (trm, ty)
+    case M.lookup (l, (Global n)) translations of
+        Just (trmPat, Just tyPat, str) -> do
+            args' <- translateExpImpApp env l args
+            argsTy' <- translateExpImpApp env l argsTy
+            let mapTrm = unify trmPat args' 
+                -- sortBy (\(a,_) (b,_) -> compare (T.length b) (T.length a)) $ unify trmPat args' 
+            let mapTy = unify tyPat argsTy' 
+            return $ foldr (\(pn, trm) s -> T.replace ("#{" <> pn <> "}") trm s) str $ mapTrm ++ mapTy
+        Just (trmPat, nothing, str) -> do
+            args' <- translateExpImpApp env l args
+            let mapTrm = unify trmPat args' 
+            return $ foldr (\(pn, trm) s -> T.replace ("#{" <> pn <> "}") trm s) str $ mapTrm
+        Nothing -> do
+            -- args' <- translateExpImpApp env l args
+            return $ toS $ show trm
+
+    where
+        translateExpImpApp :: (MonadIO m, MonadError String m) => 
+            Γ -> Text -> [ExplImpl Term] -> m [ExplImpl Text]
+        translateExpImpApp _ _ [] = return []
+        translateExpImpApp env l (E t:xs) = do
+            (_, ty) <- runElabType0' False env t `debug` ("Elab: " ++ show t)
+            t' <- translate env l t (quote0 ty)
+            xs' <- translateExpImpApp env l xs
+            return $ E t':xs'
+        translateExpImpApp env l (I t:xs) = do
+            (_, ty) <- runElabType0' False env t `debug` ("Elab: " ++ show t)
+            t' <- translate env l t (quote0 ty)
+            xs' <- translateExpImpApp env l xs
+            return $ I t':xs'
+
+unify [] [] = []
+unify (I _:xs) [] = unify xs []
+unify [] (I _:xs) = unify [] xs
+unify (I (C pn):ps) (I trm:ts) = (pn, trm): unify ps ts
+unify (E (C pn):ps) (E trm:ts) = (pn, trm): unify ps ts
+unify (I _:ps) ts@(E _:_) = unify ps ts
+unify ps@(E _:_) (I _:ts) = unify ps ts
+
+
 

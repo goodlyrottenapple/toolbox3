@@ -1,46 +1,3 @@
-{-# LANGUAGE 
-    PatternSynonyms, GADTs, ScopedTypeVariables, TupleSections, ViewPatterns, 
-    FlexibleInstances, MultiParamTypeClasses, RecursiveDo, QuasiQuotes, 
-    GeneralizedNewtypeDeriving, DerivingStrategies, DeriveGeneric, DeriveAnyClass, 
-    DeriveFunctor, FlexibleContexts, RankNTypes, OverloadedStrings, RecordWildCards, 
-    StandaloneDeriving, DeriveDataTypeable, TypeApplications #-}
-
-module Test where
-
-import Core
-
-import LamPi
-
-import Control.Monad(foldM)
-import Control.Monad.Except
-import           Text.Earley
-
-import qualified Data.Map as M
-import Data.Text(Text)
-import Data.Bifunctor(bimap)
-import Data.String.Conv
-import Data.List(intercalate, elemIndex)
-
--- main = [t3|
--- infixl 1 &&
--- infix 2 ∈ , ∉, ≡
--- infix 3 \\ , \
--- infixl 4 ∪, ∩
-
--- data (∈) : {a : Type} -> a -> Set a -> Prop where end
--- data (∉) : {a : Type} -> a -> Set a -> Prop where end
--- data (≡) : {a : Type} -> a -> a -> Prop where end
--- data (\\) : {a : Type} -> Set a -> a -> Set a where end
--- data (∪) : {a : Type} -> Set a -> Set a -> Set a where end
--- data (∩) : {a : Type} -> Set a -> Set a -> Set a where end
--- data (\) : {a : Type} -> Set a -> Set a -> Set a where end
--- data singleton : {a : Type} -> a -> Set a where end
--- data ¬ : Prop -> Prop where end
--- data (&&) : Prop -> Prop -> Prop where end
--- data infer : {a : Type} -> a -> Prop where end
--- |]
-
-test = [t3|
 {-# SMT-command ('set-logic 'QF_UFSLIAFS) #-}
 {-# SMT-log-enabled true #-}
 {-# SMT-log-level 1 #-}
@@ -177,7 +134,8 @@ translation F to LaTeX where
   | (∧) a b -> "#{a} \wedge #{b}"
   | (∨) a b -> "#{a} \vee #{b}"
   | (→) a b -> "#{a} \to #{b}"
-  | ∀ x a -> "\all#{x}.\,#{a}"
+  | ∀ x a -> "\forall #{x}.\,#{a}"
+  | ∘ x a -> "\sub{\circ}{\!#{x}} #{a}"
 end
 
 data S : Set Name -> * where
@@ -201,6 +159,8 @@ translation S to LaTeX where
   | (;) s t -> "#{s} ; #{t}"
   | (>) s t -> "#{s} > #{t}"
   | Q x s -> "\bf{Q}#{x}.\,#{s}"
+  | ⊙ x s -> "\sub{\bigcirc}{\!#{x}} #{s}"
+
 end
 
 
@@ -251,160 +211,27 @@ data (⊢) : {𝓝 : Set Name} -> S 𝓝 -> S 𝓝 -> Type where
          IR r ts ⊢ X ->
          --------------
          ↑ (R r ts) ⊢ X
- --  | CL : {X : Sucture 'Fm} -> {Y : Sucture 'Fm} -> 
-    --  X ; X ⊢ Y -> X ⊢ Y
- --  | AndL : {A : Formula 'Fm} -> {B : Formula 'Fm} -> {X : Sucture 'Fm} ->
- --         F A ; F B ⊢ X -> F (A ∧ B) ⊢ X
- --  | AndR : {A : Formula 'Fm} -> {B : Formula 'Fm} -> {X : Sucture 'Fm} -> {Y : Sucture 'Fm} ->
- --         F A ⊢ X -> F B ⊢ Y -> 
- --         ------------------
- --         X ; Y ⊢ F (A ∧ B)
 end
 
 
 translation (⊢) to LaTeX where
-  IdIR : x ⊢ y -> "\AXC{}\UIC{#{x} \vdash #{y}}\RightLabel{IdIR}"
+    IdIR : x ⊢ y -> "\AXC{}\RightLabel{$\sub{Id}{\mathbb{I}R}$}\n\UIC{$#{x} \vdash #{y}$}"
+  | AllR p : x ⊢ y -> "#{p}\RightLabel{$\sub{\forall}{R}$}\n\UIC{$#{x} \vdash #{y}$}"
+  | Q⊙Disp2 p : x ⊢ y -> "#{p}\RightLabel{(Q/⊙)}\n\UIC{$#{x} \vdash #{y}$}"
+  | ∘R p : x ⊢ y -> "#{p}\RightLabel{$\sub{∘}{R}$}\n\UIC{$#{x} \vdash #{y}$}"
+  | ⊙mon p : x ⊢ y -> "#{p}\RightLabel{⊙mon}\n\UIC{$#{x} \vdash #{y}$}"
+  | IRL p : x ⊢ y -> "#{p}\RightLabel{$\sub{\mathbb{I} R}{L}$}\n\UIC{$#{x} \vdash #{y}$}"
 end
 
 
--- def a : IR 'empty ∅ ⊢ ↑ (R 'empty ∅) where
---  a = IdIR -- {'empty} {{| |}} {∅ } 
---  end
+def lemma : ↑(R 'f ∅) ⊢ ↑(∀ 'x (∘ 'x (R 'f ∅))) where
+    lemma = (AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR)))))
+end
 
-def b = IdIR {'empty} {{| |}} {∅} end
-
-translate b to LaTeX where
+translate lemma to LaTeX where
   output = "./out.tex"
 end
 
--- def testFBad = subst (Cons 'x (const '0) (Cons 'y (var 'y) Nil)) (R '+ (var 'x ∷ var 'y ∷ ∅)) end
-def testF = subst 
-                (Cons 
-                    'x (const '0) 
-                (Cons 
-                    'y (var 'z) 
-                Nil)) 
-                (R '+ (var 'x ∷ var 'y ∷ ∅)) -- [x -> 0, y -> z](x+y)
-end
-
--- def test2 = IR '+ {?} ? end
-
-
--- def idTest : IR '+ ∅ ⊢ ↑ (R '+ ∅) where
---     idTest = IdIR
+-- translate lemma to JSON where
+--   output = "./out.tex"
 -- end
-
-
-
--- 'X ⊢ ∀ 'x (∘'x 'X)
-
-def lemma : ↑(R 'X ∅) ⊢ ↑(∀ 'x (∘ 'x (R 'X ∅))) where
-    lemma = (AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR))))) -- (AllR (Q⦿Disp2 (∘R (⦿mon (IRL IdIR)))))
-end
-
-
--- def lemma2a : ↑(R 'X ∅) ⊢ ↑(∀ 'x (R 'X ∅)) where
---     lemma2a = AllR ?
--- end
-
-
-
--- def test : {F : Set Name} -> {F1 : Set Name} -> (X : F F) -> (x : Name) ->
---     (↑ X) ⊢ (↑ (∀ {F1} {F} x (∘ {F} {F1} x X))) where
---     test = ?
--- end
-
-
--- def test2 : Trm {| 'y, 'x, 'x |} where
---     test2 = ? --var 'y
--- end
-
-
--- def test2a : Trm _ where
---     test2a = var 'y
--- end
-
-
-
--- data stupid : Name -> * where
---     stupidC : {n : Name} -> stupid n
--- end
-
-
--- def test3 : stupid 'a where
---     test3 = stupidC
--- end
-
--- -- def lemma2 : ⦿ 'x (↑(R 'X ∅)) ⊢ (↑ (∘ 'x (R 'X ∅))) where
--- --     lemma2 = ∘R ?
--- -- end
-
--- -- def lemma2 : ⦿ 'x (↑(R 'X ∅)) ⊢ (⦿ 'x (↑ (R 'X ∅))) where
--- --     lemma2 = ? -- (⦿mon ?)
--- -- end
-
-
-
--- data (⩸) : {A : *} -> A -> A -> * where
---     refl : {A : *} -> {a : A} -> a ⩸ a
--- end
-
-
--- def test4 : {|'x, 'y|} ⩸ {|'x, 'y, 'x|} where
---     test4 = refl
--- end
-
-
-
-|]
-
-
--- elab_main = do
---     r <- runExceptT $ foldM (defineDecl @(ExceptT Sing IO) True) (Γ []) main
---     case r of
---         Left e -> do
---             putSLn e
---             return $ Γ []
---         Right g -> return g
-
-
-
-
-elab_test = do
-    -- g <- elab_main
-    -- putStrLn $ show test
-    r <- runExceptT $ foldM (defineDecl @(ExceptT String IO) True) emptyΓ test
-    case r of
-        Left e -> putStrLn e
-        Right g -> putStrLn $ show g
-
-
-elab fName = do
-  s <- readFile fName
-  let start_loc = bimap Row Col (0,0)
-  case parseG (pretokenize start_loc) infixLang $ toS s of
-      Right is -> do
-          let tokens = tokenize start_loc is $ toS s
-
-          case parseG'' (tokenize start_loc is) (declLang is) $ toS s of
-              ([], Report{..}) -> fail $ mkError $ tokens !! position
-              ([x],_) -> case runSTE $ makeDecl x of
-                  Left e -> fail $ "converting to LambPi failed with error:\n" ++ e
-                  Right output -> do
-                    -- putStrLn $ show output
-                    r <- runExceptT $ foldM (defineDecl @(ExceptT String IO) True) emptyΓ output
-                    case r of
-                        Left e -> putStrLn e
-                        Right g -> putStrLn $ show g
-                  -- putStrLn "\nParsed and pretty printed output:\n"
-                  -- putStrLn $ pprint $ map (declMap unTok) x
-              (xs,_) -> fail $ "Ambiguous parse:\n" ++ (intercalate "\n" $ map pprint (xs :: [[Core.Decl (Token Text)]]))
-      Left e -> fail $ "Infix preprocessing failed:\n" ++ show e
-    
-  where 
-    mkError :: Token Text -> String
-    mkError (Token{..}) = 
-        "Parsing error at " ++ toS unTok ++ 
-        " (line " ++ show rowStart ++ ", column " ++ show colStart ++ ")"
-
--- runElabType0 g $ C "∀" :@: [E $ MkName "x",  E $ C "base"]

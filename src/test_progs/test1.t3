@@ -1,0 +1,69 @@
+infixl 1 &&
+infix 2 ⊢ , ∈ , ∉, ≡, ⩸, ⩵
+infixr 3 → , -< , >, ∷, $
+infix 3 \\ , \
+infixl 4 ∧, ∨, ;, ∪, ∩
+
+prop (≡) : {a : Type} -> (x : a) -> (y : a) -> Prop where 
+  ('= x y)
+end
+
+prop (∪) : {a : Type} -> (X : Set a) -> (Y : Set a) -> Set a where 
+  ('union X Y)
+end
+
+prop (\\) : {a : Type} -> (X : Set a) -> (x : a) -> Set a where 
+  ('setminus X ('singleton x))
+end
+
+prop (∈) : {a : Type} -> (x : a) -> (X : Set a) -> Prop where
+  ('member x X)
+end
+
+prop (∉) : {a : Type} -> (x : a) -> (X : Set a) -> Prop where
+  ('not ('member x X))
+end
+
+prop singleton : {a : Type} -> (x : a) -> Set a where 
+  ('singleton x)
+end
+
+prop (&&) : (X : Prop) -> (Y : Prop) -> Prop where 
+  ('and X Y)
+end
+
+prop infer : {a : Type} -> (x : a) -> Prop where 
+  ('= x x)
+end
+
+data List : Set Name -> (τ : Set Name -> *) -> * where
+    ∅ : -- {𝓝 : Set Name} -> [𝓝 ≡ {| |}] -> -- this is a bit of a hack to force the SMT solver to come up with X automatically
+        {τ : Set Name -> *} -> List {| |} τ
+  | (∷) : {X : Set Name} -> {Y : Set Name} -> {Z : Set Name} -> {τ : Set Name -> *} -> 
+        (x : τ X) -> List Y τ -> [Z ≡ X ∪ Y] -> List Z τ
+end
+
+
+data Trm : Set Name -> * where 
+    var : {𝓝 : Set Name} -> (n : Name) -> [𝓝 ≡ singleton n] -> Trm 𝓝
+  | const : Name -> Trm {| |}
+  | fun : {𝓝 : Set Name} -> Name -> List 𝓝 Trm -> Trm 𝓝
+end
+
+
+def empty : List {| 'x |} Trm where
+  empty = (var 'x) ∷ ∅
+end
+
+
+
+data F : Set Name -> * where
+    R : Name -> {𝓝 : Set Name} -> List 𝓝 Trm -> F 𝓝
+end
+
+
+
+
+def testF : F {| 'x |} where
+  testF = R '+ (var 'x ∷ ∅) 
+end
