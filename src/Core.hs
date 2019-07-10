@@ -8,6 +8,7 @@
 module Core where
 
 import qualified LamPi
+import LamPi(Infix(..))
 
 import Data.List(intercalate, elemIndex)
 import NeatInterpolation (text)
@@ -97,21 +98,23 @@ data TyCon name = TyCon name (Maybe name) (Exp name) (Binding name) -- Just (n,t
 --         (fmap f b)
 
 data Decl name = 
-    Data LamPi.DataOpt name (Exp name) [TyCon name] 
+    Data LamPi.DataOpt [(name, Exp name, [TyCon name])]
   | Def name (Maybe (Exp name)) (Maybe name) (Exp name) -- [PClause name]
   | PropDef name (Exp name) (LamPi.SExpr name name)
   | OptDef (LamPi.SMTOpt name)
   | Lang name
+  | RawSMT name
   | TranslateDef name name [(Exp name, Maybe (Exp name), name)]
   | TranslateApp name name name
   deriving (Show, Eq, Data, Typeable)
 
 instance Functor Decl where
-    fmap f (Data opt n e tys) = Data opt (f n) (fmap f e) (map (fmap f) tys) 
+    fmap f (Data opt defs) = Data opt $ map (\(n, e, tys) -> (f n, fmap f e, map (fmap f) tys)) defs
     fmap f (Def n x y z) = Def (f n) (fmap (fmap f) x) (fmap f y) (fmap f z)
     fmap f (PropDef n exp sexp) = PropDef (f n) (fmap f exp) (bimap f f sexp)
     fmap f (OptDef o) = OptDef (fmap f o)
     fmap f (Lang l) = Lang (f l)
+    fmap f (RawSMT l) = RawSMT (f l)
     fmap f (TranslateDef n l exps) = TranslateDef (f n) (f l) $ 
         map (\(a,b,c) -> (fmap f a, fmap (fmap f) b, f c)) exps
     fmap f (TranslateApp n l fn) = TranslateApp (f n) (f l) (f fn)
@@ -184,7 +187,7 @@ instance (PPrint name, PPrint name2) => PPrint (LamPi.SExpr name name2) where
     pprint (LamPi.List xs) = "(" ++ (intercalate " " $ map pprint xs) ++ ")"
 
 instance PPrint name => PPrint (Decl name) where
-    pprint (Data opt n t tys) = "data " ++ pprint opt ++ pprint n ++ " : " ++ pprint t ++ " where\n" ++
+    pprint (Data opt [(n,t,tys)]) = "data " ++ pprint opt ++ pprint n ++ " : " ++ pprint t ++ " where\n" ++
         (intercalate " |\n" $ map ((" " ++) . pprint) tys) ++"\nend"
     pprint (Def n Nothing _ e) = "def " ++ pprint n ++ " = " ++ pprint e ++ "end"
     pprint (Def n (Just t) _ e) = 
@@ -194,6 +197,7 @@ instance PPrint name => PPrint (Decl name) where
         "prop " ++ pprint n ++ " : " ++ pprint t ++ " where\n    " ++
                   pprint sexp ++ "\nend"
     pprint (OptDef o) = pprint o
+    pprint (RawSMT l) = "smt\n" ++ pprint l ++ "\nend"
     pprint (Lang l) = "language " ++ pprint l
     pprint (TranslateDef n l defs) = "translation " ++ pprint n ++ " to "++ pprint l ++ " where\n" ++
         (intercalate " |\n" $ map (\(s, t, str) -> " " ++ pprint s ++ (case t of 
@@ -481,7 +485,9 @@ ignoreInfix = blockDrop "infix" "\n"
 ignoreLang = blockDrop "language" "\n"
 ignoreTranslate = blockDrop "translate" "end\n"
 ignoreTranslateDef = blockDrop "translation" "end\n"
-ignoreSMT = blockDrop "smt" "end\n"
+ignoreSMT = blockDrop "smt" "\nend\n"
+rawSMT = block "smt" "\nend\n"
+ignoreRec = blockDrop "rec" "end\n"
 
 
 longestFirst :: Text -> Text -> Ordering
@@ -497,12 +503,12 @@ pretokenize start_loc =
     flip evalState start_loc . 
     tokenizer (
         whitespace : newline : tab : ignoreLang : ignoreTranslate : ignoreTranslateDef :
-        ignoreSMT :
+        ignoreSMT : ignoreRec :
         ignoreData : ignoreDef : ignoreProp : ignoreComment : ignoreComment2 :
         (map reservedKeyword $ sortBy longestFirst reservedKeywords))
 
 
-tokenize :: (Row,Col) -> [Infix] -> Text -> [Token Text]
+tokenize :: (Row,Col) -> [LamPi.Infix] -> Text -> [Token Text]
 tokenize start_loc is = 
     map content .
     filter ((/= Drop) . label) . 
@@ -511,7 +517,7 @@ tokenize start_loc is =
         whitespace : newline : tab : 
         ignoreInfixl : ignoreInfixr : ignoreInfix : reservedKeyword "{-#" : reservedKeyword "#-}" : 
         quotes : quotes2 :
-        ignoreComment : ignoreComment2 : ignoreSMT :
+        ignoreComment : ignoreComment2 : rawSMT :
         name :
         map reservedKeyword reserved)
     --)
@@ -560,14 +566,9 @@ var reserved = satisfy (\t ->
 
 
 
-data Infix = Infix {
-    assoc :: Associativity
-  , precedence :: Int
-  , symb :: Text
-} deriving (Show, Eq)
 
 
-infixLang :: G [Infix]
+infixLang :: G [LamPi.Infix]
 infixLang = mdo
     name   <- rule $ unTok <$> var (HS.fromList reservedKeywords)
     number <- rule $ (read . T.unpack . unTok) <$> satisfy (\Token{..} -> T.all isDigit unTok)
@@ -577,9 +578,9 @@ infixLang = mdo
         <|> (:) <$> name <*> (namedToken "," *> symbListR)
     expr <- rule $
             pure []
-        <|> (\n xs ys -> (map (Infix NonAssoc n) xs) ++ ys) <$> (namedToken "infix" *> number) <*> symbListR <*> expr
-        <|> (\n xs ys -> (map (Infix LeftAssoc n) xs) ++ ys) <$> (namedToken "infixl" *> number) <*> symbListR <*> expr
-        <|> (\n xs ys -> (map (Infix RightAssoc n) xs) ++ ys) <$> (namedToken "infixr" *> number) <*> symbListR <*> expr
+        <|> (\n xs ys -> (map (LamPi.Infix NonAssoc n) xs) ++ ys) <$> (namedToken "infix" *> number) <*> symbListR <*> expr
+        <|> (\n xs ys -> (map (LamPi.Infix LeftAssoc n) xs) ++ ys) <$> (namedToken "infixl" *> number) <*> symbListR <*> expr
+        <|> (\n xs ys -> (map (LamPi.Infix RightAssoc n) xs) ++ ys) <$> (namedToken "infixr" *> number) <*> symbListR <*> expr
     return expr
 
 reservedKeywords :: [Text]
@@ -587,12 +588,12 @@ reservedKeywords =
     ["\"", "(", ")", "{|", "|}", "{", "}", "[", "]", "=>", "->", ":", ",", "\'", "?", "=", "_",  --, "true", "false", 
         -- "SMT-command", "SMT-log-level", "SMT-log-enabled", "language", "translate", "to", "bind",
         -- "end", "where", , "infix", "infixl", "infixr"
-        "data", "def", "prop", "|"] 
+        "data", "rec", "def", "prop", "|"] 
 
 bracketed :: (Eq b, IsString b) => Prod r b b a -> Prod r b b a
 bracketed x = namedToken "(" *> x <* namedToken ")"
 
-expLang :: [Infix] -> G (Exp (Token Text))
+expLang :: [LamPi.Infix] -> G (Exp (Token Text))
 expLang infxLst = mdo
     varName <- rule $ var (HS.fromList $ reservedKeywords ++ map symb infxLst)
     varR <- rule $ 
@@ -621,7 +622,7 @@ expLang infxLst = mdo
     appR <- rule $ 
             atom 
         <|> (:$:) <$> appR <*> atom -- (e .. e) (e) / A (e)
-        <|> (:|$|:) <$> appR <*> (namedToken "{" *> atom <* namedToken "}")
+        <|> (:|$|:) <$> appR <*> (namedToken "{" *> expr <* namedToken "}")
 
     arrR <- rule $
             expr
@@ -640,16 +641,16 @@ expLang infxLst = mdo
         table :: [[(Holey (Prod r (Token Text) (Token Text) (Token Text)), Associativity)]]
         table = map (map infixToHoley) sortedXs
             where
-                xs :: [[Infix]]
+                xs :: [[LamPi.Infix]]
                 xs = groupBy (\a b -> (precedence a) == (precedence b)) infxLst
                 
                 sortedXs = sortBy (\a b -> compare (precedence (head a)) (precedence (head b))) xs
 
-                infixToHoley :: Infix -> (Holey (Prod r (Token Text) (Token Text) (Token Text)), Associativity)
-                infixToHoley Infix{..} = ([Nothing, Just $ namedToken $ tok symb, Nothing],assoc)
+                infixToHoley :: LamPi.Infix -> (Holey (Prod r (Token Text) (Token Text) (Token Text)), Associativity)
+                infixToHoley LamPi.Infix{..} = ([Nothing, Just $ namedToken $ tok symb, Nothing],assoc)
 
 
-sExpLang :: [Infix] -> G (LamPi.SExpr (Token Text) (Token Text))
+sExpLang :: [LamPi.Infix] -> G (LamPi.SExpr (Token Text) (Token Text))
 sExpLang infxLst = mdo
     varR <- rule $ LamPi.VAtom <$> var (HS.fromList $ reservedKeywords ++ map symb infxLst)
 
@@ -671,7 +672,7 @@ sExpLang infxLst = mdo
 
 
 
-expLangAppOnly :: [Infix] -> G (Exp (Token Text))
+expLangAppOnly :: [LamPi.Infix] -> G (Exp (Token Text))
 expLangAppOnly infxLst = mdo
     varR <- rule $ 
             V <$> var (HS.fromList $ reservedKeywords ++ map symb infxLst)
@@ -693,16 +694,16 @@ expLangAppOnly infxLst = mdo
         table :: [[(Holey (Prod r (Token Text) (Token Text) (Token Text)), Associativity)]]
         table = map (map infixToHoley) sortedXs
             where
-                xs :: [[Infix]]
+                xs :: [[LamPi.Infix]]
                 xs = groupBy (\a b -> (precedence a) == (precedence b)) infxLst
                 
                 sortedXs = sortBy (\a b -> compare (precedence (head a)) (precedence (head b))) xs
 
-                infixToHoley :: Infix -> (Holey (Prod r (Token Text) (Token Text) (Token Text)), Associativity)
-                infixToHoley Infix{..} = ([Nothing, Just $ namedToken $ tok symb, Nothing],assoc)
+                infixToHoley :: LamPi.Infix -> (Holey (Prod r (Token Text) (Token Text) (Token Text)), Associativity)
+                infixToHoley LamPi.Infix{..} = ([Nothing, Just $ namedToken $ tok symb, Nothing],assoc)
 
   
-declLang :: [Infix] -> G [Decl (Token Text)]
+declLang :: [LamPi.Infix] -> G [Decl (Token Text)]
 declLang infxLst = mdo
     name  <- rule $ 
             var (HS.fromList $ reservedKeywords ++ map symb infxLst) 
@@ -721,12 +722,18 @@ declLang infxLst = mdo
         <|> (:) <$> (tyConName <*> expR <*> pure Unbound) <*> (namedToken "|" *> tyConR)
         <|> (:) <$> (tyConName <*> 
                 expR <*> (namedToken "bind" *> (Bind <$> name <*> (namedToken "in" *> name)))) <*> (namedToken "|" *> tyConR)
-
+    dataOpt <- rule $
+        (namedToken "data" *> (pure LamPi.None)) <|> 
+        (namedToken "data" *> namedToken "[" *> namedToken "SMT" *> namedToken "]" *> (pure LamPi.LiftToSMT))
     dataR <- rule $ 
-        ((Data LamPi.None) <$> (namedToken "data" *> name) <|>
-         (Data LamPi.LiftToSMT) <$> (namedToken "data" *> namedToken "[" *> namedToken "SMT" *> namedToken "]" *> name))
-        <*> 
-        (namedToken ":" *> expR) <*> (namedToken "where" *> tyConR <* namedToken "end")
+        Data <$> dataOpt <*> ((\n t cs -> [(n,t,cs)]) <$> name <*> (namedToken ":" *> expR) <*> (namedToken "where" *> tyConR <* namedToken "end"))
+    
+    recDataR <- rule $ Data <$>
+        (namedToken "rec" *> dataOpt) <*> dataList
+
+    dataList <- rule $
+            ((\n t cs -> [(n,t,cs)]) <$> name <*> (namedToken ":" *> expR) <*> (namedToken "where" *> tyConR <* namedToken "end"))
+        <|> ((\n t cs xs -> (n,t,cs):xs) <$> name <*> (namedToken ":" *> expR) <*> (namedToken "where" *> tyConR <* namedToken "and") <*> dataList)
 
     defR <- rule $ 
             (\n e -> Def n Nothing Nothing e) <$> (namedToken "def" *> name <* namedToken "=") <*> 
@@ -786,9 +793,9 @@ declLang infxLst = mdo
             ( (,,) <$> expAppOnlyR <*> pure Nothing <*> (namedToken "->" *> stringR) ) <*> 
             (namedToken "|" *> translateConsR)
 
-
-    return $ many (dataR <|> defR <|> propR <|> smtOpt <|> smtLog <|> smtLogLevel <|> 
-        lang <|> translation <|> translate)
+    rawSMT <- rule $ RawSMT <$> (namedToken "smt" *> satisfy (\s -> True) <* namedToken "\nend\n")
+    return $ many (dataR <|> recDataR <|> defR <|> propR <|> smtOpt <|> smtLog <|> smtLogLevel <|> 
+        lang <|> translation <|> translate <|> rawSMT)
 
 newtype Constants = Constants { unConstants :: [Text] } deriving (Eq, Show)
 newtype HoleCount = HoleCount { unHoleCount :: Int } deriving (Eq, Show)
@@ -860,15 +867,21 @@ getVars vars x = vars
 
 makeDecl :: (MonadError String m, Has Constants s, Has HoleCount s, MonadState s m) => [Decl (Token Text)] -> m [LamPi.Decl]
 makeDecl [] = return []
-makeDecl (Data opt (Token n _ _ _ _) t cs:xs) = do
-    t' <- mkTerm [] t
-    modify (\s -> modifier (\(Constants xs) -> Constants $ n:xs) s)
-    cs' <- mapM addCons cs
-    -- g' <- LamPi.defineDecl0 g (LamPi.Data n t' cs')
+makeDecl (Data opt defs:xs) = do
+    mapM_ process defs
+    defs' <- mapM process2 defs
     xs' <- makeDecl xs
-    return $ LamPi.Data opt n t' cs':xs'
+    return $ LamPi.Data opt defs':xs'
 
     where
+        process (Token n _ _ _ _, t, cs) = do
+            t' <- mkTerm [] t
+            modify (\s -> modifier (\(Constants xs) -> Constants $ n:xs) s)
+        process2 (Token n _ _ _ _, t, cs) = do
+            t' <- mkTerm [] t
+            cs' <- mapM addCons cs
+            return $ (n, t', cs')
+
         -- addCons :: TyCon (Token Text) -> (Text, LamPi.Term)
         addCons (TyCon (Token n _ _ _ _) n' e _) = do
             e' <- mkTerm [] e
@@ -906,6 +919,9 @@ makeDecl (OptDef o:xs) = do
 makeDecl (Lang l:xs) = do
     xs' <- makeDecl xs
     return $ LamPi.Lang (unTok l):xs'
+makeDecl (RawSMT s:xs) = do
+    xs' <- makeDecl xs
+    return $ LamPi.RawSMT (unTok s):xs'
 makeDecl (TranslateDef tyN l defs:xs) = do
     xs' <- makeDecl xs
     let defs' = map (\(c,t,s) -> (mkTermTranslate c, fmap mkTermTranslate t, unTok s)) defs

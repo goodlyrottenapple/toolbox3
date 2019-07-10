@@ -1,0 +1,154 @@
+{-# SMT-log-enabled true #-}
+
+infixl 1 &&
+infix 2 ⊢ , ∈ , ++, ≡
+infix 3 $, \\ , \
+infixr 3 → , >, ∷, $
+infixl 4 ∧, ∨, ;, ∪, ∩
+
+
+language LaTeX
+
+rec data [SMT] ListT : * where
+    ∅ [nil] : ListT
+  | (∷) [cons] : (hd : Trm) -> (tl : ListT) -> ListT
+and Trm : * where
+    V : (var: Name) -> Trm
+  | R : (nm : Name) -> (args : ListT) -> Trm
+end
+
+
+translation ListT to LaTeX where
+    ∅ -> ""
+  | (∷) x xs -> "\cons{#{x}}{#{xs}}"
+end
+
+translation Trm to LaTeX where
+    V n -> "#{n}"
+  | R n t -> "#{n}(#{t})"
+end
+
+data [SMT] F : * where
+    P : (nmF : Name) -> (trm : Trm) -> F
+  | (∧) [andF] : (andL:F) -> (andR:F) -> F
+  | (∨) [orF]  : (orL:F) -> (orR:F) -> F
+  | (→) [impF] : (impL:F) -> (impR:F) -> F
+  | ¬   [negF] : (neg:F) -> F
+  | ∀   [allF] : (allN:Name) -> (allF:F) -> F
+end
+
+translation F to LaTeX where
+    P n t -> "#{n}(#{t})"
+  | (∧) a b -> "#{a} \wedge #{b}"
+  | (∨) a b -> "#{a} \vee #{b}"
+  | (→) a b -> "#{a} \to #{b}"
+  | ¬ a -> "\neg #{a}"
+  | ∀ n a -> "\forall #{n}. #{a}"
+end
+
+
+
+-- prop (≡) : {a : Type} -> (x : a) -> (y : a) -> Prop where 
+--   ('= x y)
+-- end
+
+-- smt
+-- (define-fun-rec concatF ((x (List F)) (y (List F))) (List F)
+--  (ite (= x (as nil (List F)))
+--       y
+--       (cons (hd x) (concatF (tl x) y))
+--  )
+-- )
+-- end
+
+-- prop (++) : {a : Type} -> (x : List F) -> (y : List F) -> List F where 
+--   ('concatF x y)
+-- end
+
+-- smt
+-- (define-fun-rec substL ((n String) (s Trm) (t Trm)) Trm
+--   (match t (
+--     ((V m) )
+--     ((R n as) (R n (substL n s as)))
+--   ))
+-- )
+-- end
+
+
+-- smt
+-- (define-fun-rec substT ((n String) (s Trm) (t Trm)) Trm
+--   (match t (
+--     ((V m) )
+--     ((R n as) (R n (substL n s as)))
+--   ))
+-- )
+-- end
+
+
+-- prop subst : (n : Name) -> (f : F) -> (a : F) -> F where 
+--   ('substF n f a)
+-- end
+
+-- data (⊢) : List F -> List F -> Type where
+--     Id : {a : Name} -> {args : List Name} -> 
+--       --------------------------------
+--       (R a args) ∷ ∅ ⊢ (R a args) ∷ ∅
+--   | AndL1 : {Γ : List F} -> {Δ : List F} -> {A : F} -> {B : F} ->
+--          A ∷ Γ ⊢ Δ ->
+--       ---------------
+--       (A ∧ B) ∷ Γ ⊢ Δ
+--   | AndL2 : {Γ : List F} -> {Δ : List F} -> {A : F} -> {B : F} ->
+--          B ∷ Γ ⊢ Δ ->
+--       ---------------
+--       (A ∧ B) ∷ Γ ⊢ Δ
+--   | OrR1 : {Γ : List F} -> {Δ : List F} -> {A : F} -> {B : F} ->
+--          Γ ⊢ A ∷ Δ ->
+--       ---------------
+--       Γ ⊢ (A ∨ B) ∷ Δ
+--   | OrR2 : {Γ : List F} -> {Δ : List F} -> {A : F} -> {B : F} ->
+--          Γ ⊢ B ∷ Δ ->
+--       ---------------
+--       Γ ⊢ (A ∨ B) ∷ Δ
+--   | OrL : {Γ₁ : List F} -> {Γ₂ : List F} -> 
+--           {Δ₁ : List F} -> {Δ₂ : List F} -> 
+--           {Γ : List F} -> [Γ ≡ (Γ₁ ++ Γ₂)] -> 
+--           {Δ : List F} -> [Δ ≡ (Δ₁ ++ Δ₂)] -> 
+--           {A : F} -> {B : F} ->
+--       (A ∷ Γ₁) ⊢ Δ₁ -> (B ∷ Γ₂) ⊢ Δ₂ -> 
+--       ------------------------------
+--               (A ∨ B) ∷ Γ ⊢ Δ
+--   | CR : {Γ : List F} -> {Δ : List F} -> {A : F} ->
+--       Γ ⊢ A ∷ A ∷ Δ ->
+--       -------------
+--         Γ ⊢ A ∷ Δ
+-- end
+
+
+-- translation (⊢) to LaTeX where
+--     Id : x ⊢ y -> "\AXC{}\RightLabel{$Id$}\n\UIC{$#{x} \vdash #{y}$}"
+--   | AndL1 p : x ⊢ y -> "#{p}\RightLabel{$\sub{\wedge}{L1}$}\n\UIC{$#{x} \vdash #{y}$}"
+--   | AndL2 p : x ⊢ y -> "#{p}\RightLabel{$\sub{\wedge}{L2}$}\n\UIC{$#{x} \vdash #{y}$}"
+--   | OrR1 p : x ⊢ y -> "#{p}\RightLabel{$\sub{\vee}{R1}$}\n\UIC{$#{x} \vdash #{y}$}"
+--   | OrR2 p : x ⊢ y -> "#{p}\RightLabel{$\sub{\vee}{R2}$}\n\UIC{$#{x} \vdash #{y}$}"
+--   | OrL p q : x ⊢ y -> "#{p}\n\n#{q}\RightLabel{$\sub{\vee}{L}$}\n\BIC{$#{x} \vdash #{y}$}"
+--   | CR p : x ⊢ y -> "#{p}\RightLabel{$\sub{C}{R}$}\n\UIC{$#{x} \vdash #{y}$}"
+-- end
+
+-- def test : At 'a ∨ At 'b ∷ ∅ ⊢ At 'a ∨ At 'b ∷ ∅ where
+--   test = CR 
+--     (OrL 
+--       {∅} {∅} 
+--       { At 'a ∨ At 'b ∷ ∅ } { At 'a ∨ At 'b ∷ ∅ } 
+--       (OrR1 Id) (OrR2 Id))
+-- end
+
+
+
+-- translate test to LaTeX where
+--   output = "./out.tex"
+-- end
+
+
+-- def lemma : ↑(R 'f ∅) ⊢ ↑(∀ 'x (∘ 'x (R 'f ∅))) where
+--     lemma = (AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR)))))
+-- end

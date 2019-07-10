@@ -379,7 +379,7 @@ elab_test = do
         Right g -> putStrLn $ show g
 
 
-elab fName = do
+elab verboseFlag fName = do
   s <- readFile fName
   let start_loc = bimap Row Col (0,0)
   case parseG (pretokenize start_loc) infixLang $ toS s of
@@ -392,13 +392,17 @@ elab fName = do
                   Left e -> fail $ "converting to LambPi failed with error:\n" ++ e
                   Right output -> do
                     -- putStrLn $ show output
-                    r <- runExceptT $ foldM (defineDecl @(ExceptT String IO) True) emptyΓ output
+                    r <- runExceptT $ 
+                      foldM 
+                        (defineDecl @(ExceptT String IO) True) 
+                        emptyΓ{infixM = M.fromList $ map (\x@Infix{..} -> (symb, x)) is} 
+                        output
                     case r of
                         Left e -> putStrLn e
-                        Right g -> putStrLn $ show g
+                        Right g -> if verboseFlag then putStrLn $ show g else pure () -- 
                   -- putStrLn "\nParsed and pretty printed output:\n"
                   -- putStrLn $ pprint $ map (declMap unTok) x
-              (xs,_) -> fail $ "Ambiguous parse:\n" ++ (intercalate "\n" $ map pprint (xs :: [[Core.Decl (Token Text)]]))
+              (xs,_) -> fail $ "Ambiguous parse:\n" ++ (intercalate "\n" $ map (Core.pprint) (xs :: [[Core.Decl (Token Text)]]))
       Left e -> fail $ "Infix preprocessing failed:\n" ++ show e
     
   where 
