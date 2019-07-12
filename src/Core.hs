@@ -98,9 +98,9 @@ data TyCon name = TyCon name (Maybe name) (Exp name) (Binding name) -- Just (n,t
 --         (fmap f b)
 
 data Decl name = 
-    Data LamPi.DataOpt [(name, Exp name, [TyCon name])]
-  | Def name (Maybe (Exp name)) (Maybe name) (Exp name) -- [PClause name]
-  | PropDef name (Exp name) (LamPi.SExpr name name)
+    Data LamPi.DataOpt [(name, Maybe name, Exp name, [TyCon name])]
+  | Def name (Maybe name) (Maybe (Exp name)) (Either (Exp name) (Maybe (LamPi.SExpr name name))) -- [PClause name]
+  -- | PropDef name (Exp name) 
   | OptDef (LamPi.SMTOpt name)
   | Lang name
   | RawSMT name
@@ -109,9 +109,11 @@ data Decl name =
   deriving (Show, Eq, Data, Typeable)
 
 instance Functor Decl where
-    fmap f (Data opt defs) = Data opt $ map (\(n, e, tys) -> (f n, fmap f e, map (fmap f) tys)) defs
-    fmap f (Def n x y z) = Def (f n) (fmap (fmap f) x) (fmap f y) (fmap f z)
-    fmap f (PropDef n exp sexp) = PropDef (f n) (fmap f exp) (bimap f f sexp)
+    fmap f (Data opt defs) = Data opt $ map 
+        (\(n, mn, e, tys) -> (f n, fmap f mn, fmap f e, map (fmap f) tys)) defs
+    fmap f (Def n n' t b) = 
+        Def (f n) (fmap f n') (fmap (fmap f) t) (bimap (fmap f) (fmap (bimap f f)) b)
+    -- fmap f (PropDef n exp sexp) = PropDef (f n) (fmap f exp) (bimap f f sexp)
     fmap f (OptDef o) = OptDef (fmap f o)
     fmap f (Lang l) = Lang (f l)
     fmap f (RawSMT l) = RawSMT (f l)
@@ -187,15 +189,40 @@ instance (PPrint name, PPrint name2) => PPrint (LamPi.SExpr name name2) where
     pprint (LamPi.List xs) = "(" ++ (intercalate " " $ map pprint xs) ++ ")"
 
 instance PPrint name => PPrint (Decl name) where
-    pprint (Data opt [(n,t,tys)]) = "data " ++ pprint opt ++ pprint n ++ " : " ++ pprint t ++ " where\n" ++
-        (intercalate " |\n" $ map ((" " ++) . pprint) tys) ++"\nend"
-    pprint (Def n Nothing _ e) = "def " ++ pprint n ++ " = " ++ pprint e ++ "end"
-    pprint (Def n (Just t) _ e) = 
-        "def " ++ pprint n ++ " : " ++ pprint t ++ " where\n    " ++
-                  pprint n ++ " = " ++ pprint t ++ "end"
-    pprint (PropDef n t sexp) = 
-        "prop " ++ pprint n ++ " : " ++ pprint t ++ " where\n    " ++
-                  pprint sexp ++ "\nend"
+    pprint (Data opt xs) = (case xs of
+        [_] -> ""
+        _ -> "rec ") ++ pprint opt ++ "data " ++ (intercalate "\n" $ map printData xs)
+
+        where
+            printData (n, mn, t, tys) = pprint n ++ 
+                (case mn of 
+                    Just n' -> " [" ++ pprint n' ++ "]"
+                    Nothing -> "") 
+                ++ " : " ++ pprint t ++ " where\n" ++
+                (intercalate " |\n" $ map ((" " ++) . pprint) tys) ++"\nend"
+
+    pprint (Def n Nothing Nothing (Left e)) = "def " ++ pprint n ++ " = " ++ pprint e ++ "end"
+    pprint (Def n mn (Just t) (Left e)) = 
+        "def " ++ pprint n ++
+        (case mn of 
+            Just n' -> " [" ++ pprint n' ++ "]"
+            Nothing -> "") ++ 
+        " : " ++ pprint t ++ " where\n " ++ pprint e ++ "\nend"
+    pprint (Def n mn (Just t) (Right (Just e))) = 
+        "smt-def " ++ pprint n ++
+        (case mn of 
+            Just n' -> " [" ++ pprint n' ++ "]"
+            Nothing -> "") ++ 
+        " : " ++ pprint t ++ " where\n " ++ pprint e ++ "\nend"
+    pprint (Def n mn (Just t) (Right Nothing)) = 
+        "smt-builtin " ++ pprint n ++
+        (case mn of 
+            Just n' -> " [" ++ pprint n' ++ "]"
+            Nothing -> "") ++ 
+        " : " ++ pprint t ++ " end"
+    -- pprint (PropDef n t sexp) = 
+    --     "prop " ++ pprint n ++ " : " ++ pprint t ++ " where\n " ++
+    --               pprint sexp ++ "\nend"
     pprint (OptDef o) = pprint o
     pprint (RawSMT l) = "smt\n" ++ pprint l ++ "\nend"
     pprint (Lang l) = "language " ++ pprint l
@@ -217,7 +244,7 @@ instance PPrint name => PPrint (LamPi.SMTOpt name) where
 
 instance PPrint LamPi.DataOpt where
     pprint (LamPi.None) = "" 
-    pprint (LamPi.LiftToSMT) = " [SMT] "
+    pprint (LamPi.LiftToSMT) = "smt-"
     -- pprint (Def n t patts) = "def " ++ pprint n ++ " : " ++ pprint t ++ " where\n" ++
     --     (intercalate " |\n" $ map ((" " ++) . pprint) patts) ++"\nend"
 
@@ -476,9 +503,12 @@ int = map (intAux . show) [0..9]
 --                 quotePrefix = T.takeWhile (/= '\"') $ T.drop (T.length start) x
 --                 rest = T.tail $ T.dropWhile (/= '\"') $ T.tail x
 
+ignoreSMTDef = blockDrop "smt-def" "end\n"
+ignoreSMTData = blockDrop "smt-data" "end\n"
+ignoreSMTBuiltin = blockDrop "smt-builtin" "end\n"
 ignoreData = blockDrop "data" "end\n"
 ignoreDef = blockDrop "def" "end\n"
-ignoreProp = blockDrop "prop" "end"
+-- ignoreProp = blockDrop "prop" "end"
 ignoreInfixl = blockDrop "infixl" "\n"
 ignoreInfixr = blockDrop "infixr" "\n"
 ignoreInfix = blockDrop "infix" "\n"
@@ -503,8 +533,8 @@ pretokenize start_loc =
     flip evalState start_loc . 
     tokenizer (
         whitespace : newline : tab : ignoreLang : ignoreTranslate : ignoreTranslateDef :
-        ignoreSMT : ignoreRec :
-        ignoreData : ignoreDef : ignoreProp : ignoreComment : ignoreComment2 :
+        ignoreSMT : ignoreRec : ignoreSMTData : ignoreSMTDef : ignoreSMTBuiltin :
+        ignoreData : ignoreDef : ignoreComment : ignoreComment2 :
         (map reservedKeyword $ sortBy longestFirst reservedKeywords))
 
 
@@ -517,9 +547,9 @@ tokenize start_loc is =
         whitespace : newline : tab : 
         ignoreInfixl : ignoreInfixr : ignoreInfix : reservedKeyword "{-#" : reservedKeyword "#-}" : 
         quotes : quotes2 :
-        ignoreComment : ignoreComment2 : rawSMT :
+        ignoreComment : ignoreComment2 : 
         name :
-        map reservedKeyword reserved)
+        map reservedKeyword reserved ++ [rawSMT])
     --)
     where
         reserved = sortBy longestFirst $ reservedKeywords ++ map symb is
@@ -588,7 +618,7 @@ reservedKeywords =
     ["\"", "(", ")", "{|", "|}", "{", "}", "[", "]", "=>", "->", ":", ",", "\'", "?", "=", "_",  --, "true", "false", 
         -- "SMT-command", "SMT-log-level", "SMT-log-enabled", "language", "translate", "to", "bind",
         -- "end", "where", , "infix", "infixl", "infixr"
-        "data", "rec", "def", "prop", "|"] 
+        "smt-data", "smt-builtin", "data", "rec", "smt-def", "def", "|"] 
 
 bracketed :: (Eq b, IsString b) => Prod r b b a -> Prod r b b a
 bracketed x = namedToken "(" *> x <* namedToken ")"
@@ -706,13 +736,14 @@ expLangAppOnly infxLst = mdo
 declLang :: [LamPi.Infix] -> G [Decl (Token Text)]
 declLang infxLst = mdo
     name  <- rule $ 
-            var (HS.fromList $ reservedKeywords ++ map symb infxLst) 
+            var (HS.fromList $ reservedKeywords ++ map symb infxLst) <|>
+            (namedToken "\'" *> satisfy (\s -> True))
         <|> namedToken "(" *> satisfy (\s -> unTok s `HS.member` (HS.fromList $ map symb infxLst)) <* namedToken ")"
     expR   <- expLang infxLst
 
     tyConName <- rule $
-        ((\x -> TyCon x Nothing) <$> (name <* namedToken ":")) <|>
-        (TyCon <$> name <*> (namedToken "[" *> (Just <$> name) <* namedToken "]" <* namedToken ":"))
+        ((\x -> TyCon x Nothing) <$> (name <* namedToken ":")) -- <|>
+        -- (TyCon <$> name <*> (namedToken "[" *> (Just <$> name) <* namedToken "]" <* namedToken ":"))
     tyConR <- rule $ 
             pure []
         <|> (:[]) <$> (tyConName <*> expR <*> pure Unbound)
@@ -723,32 +754,47 @@ declLang infxLst = mdo
         <|> (:) <$> (tyConName <*> 
                 expR <*> (namedToken "bind" *> (Bind <$> name <*> (namedToken "in" *> name)))) <*> (namedToken "|" *> tyConR)
     dataOpt <- rule $
-        (namedToken "data" *> (pure LamPi.None)) <|> 
-        (namedToken "data" *> namedToken "[" *> namedToken "SMT" *> namedToken "]" *> (pure LamPi.LiftToSMT))
+        (namedToken "smt-data" *> (pure LamPi.LiftToSMT)) <|> 
+        (namedToken "data" *> (pure LamPi.None)) -- <|> 
+        -- (namedToken "data" *> namedToken "[" *> namedToken "SMT" *> namedToken "]" *> (pure LamPi.LiftToSMT))
+    tyName <- rule $
+        ((\x -> (x, Nothing)) <$> (name <* namedToken ":")) -- <|>
+        -- ((,) <$> name <*> (namedToken "[" *> (Just <$> name) <* namedToken "]" <* namedToken ":"))
+
+    tyName2 <- rule $
+        ((\x -> (x, Nothing)) <$> (name <* namedToken ":")) <|>
+        ((,) <$> name <*> (namedToken "[" *> (Just <$> name) <* namedToken "]" <* namedToken ":"))
+
     dataR <- rule $ 
-        Data <$> dataOpt <*> ((\n t cs -> [(n,t,cs)]) <$> name <*> (namedToken ":" *> expR) <*> (namedToken "where" *> tyConR <* namedToken "end"))
+        Data <$> dataOpt <*> ((\(n,n') t cs -> [(n, n', t,cs)]) <$> tyName <*> expR <*> (namedToken "where" *> tyConR <* namedToken "end"))
     
     recDataR <- rule $ Data <$>
         (namedToken "rec" *> dataOpt) <*> dataList
 
     dataList <- rule $
-            ((\n t cs -> [(n,t,cs)]) <$> name <*> (namedToken ":" *> expR) <*> (namedToken "where" *> tyConR <* namedToken "end"))
-        <|> ((\n t cs xs -> (n,t,cs):xs) <$> name <*> (namedToken ":" *> expR) <*> (namedToken "where" *> tyConR <* namedToken "and") <*> dataList)
+            ((\(n,n') t cs -> [(n,n',t,cs)]) <$> tyName <*> expR <*> (namedToken "where" *> tyConR <* namedToken "end"))
+        <|> ((\(n,n') t cs xs -> (n,n',t,cs):xs) <$> tyName <*> expR <*> (namedToken "where" *> tyConR <* namedToken "and") <*> dataList)
+
 
     defR <- rule $ 
-            (\n e -> Def n Nothing Nothing e) <$> (namedToken "def" *> name <* namedToken "=") <*> 
+            (\n e -> Def n Nothing Nothing (Left e)) <$> (namedToken "def" *> name <* namedToken "=") <*> 
                 (expR <* namedToken "end")
-        <|> Def <$> 
+        <|> (\n t e-> Def n Nothing t (Left e)) <$> 
             (namedToken "def" *> name <* namedToken ":") <*> 
             ((Just <$> expR) <* namedToken "where") <*>
-            ((Just <$> name) <* namedToken "=") <*>
             (expR <* namedToken "end")
+        <|> (\(n,n') t e -> Def n n' t (Right (Just e))) <$> 
+            (namedToken "smt-def" *> tyName) <*> 
+            ((Just <$> expR) <* namedToken "where") <*>
+            (sExpR <* namedToken "end")
+        <|> (\(n,n') t -> Def n n' t (Right Nothing)) <$> 
+            (namedToken "smt-builtin" *> tyName2) <*> ((Just <$> expR) <* namedToken "end")
 
     sExpR <- sExpLang infxLst
 
-    propR <- rule $
-        PropDef <$> (namedToken "prop" *> name <* namedToken ":") <*> 
-            expR <*> (namedToken "where" *> sExpR <* namedToken "end")
+    -- propR <- rule $
+    --     (\(n,n') t e -> Def n n' (Just t) (Right (Just e))) <$> (namedToken "smt-def" *> tyName <* namedToken ":") <*> 
+    --         expR <*> (namedToken "where" *> sExpR <* namedToken "end")
 
     smtOpt <- rule $ OptDef . LamPi.SMTCmd <$> (namedToken "{-#" *> namedToken "SMT-command" *> sExpR <* namedToken "#-}")
     number <- rule $ (read . T.unpack . unTok) <$> satisfy (\Token{..} -> T.all isDigit unTok)
@@ -794,7 +840,8 @@ declLang infxLst = mdo
             (namedToken "|" *> translateConsR)
 
     rawSMT <- rule $ RawSMT <$> (namedToken "smt" *> satisfy (\s -> True) <* namedToken "\nend\n")
-    return $ many (dataR <|> recDataR <|> defR <|> propR <|> smtOpt <|> smtLog <|> smtLogLevel <|> 
+    return $ many (dataR <|> recDataR <|> defR -- <|> propR 
+        <|> smtOpt <|> smtLog <|> smtLogLevel <|> 
         lang <|> translation <|> translate <|> rawSMT)
 
 newtype Constants = Constants { unConstants :: [Text] } deriving (Eq, Show)
@@ -874,36 +921,54 @@ makeDecl (Data opt defs:xs) = do
     return $ LamPi.Data opt defs':xs'
 
     where
-        process (Token n _ _ _ _, t, cs) = do
+        process (Token n _ _ _ _, Nothing, t, cs) = do
             t' <- mkTerm [] t
             modify (\s -> modifier (\(Constants xs) -> Constants $ n:xs) s)
-        process2 (Token n _ _ _ _, t, cs) = do
+        process (Token n _ _ _ _, (Just (Token n' _ _ _ _)), t, cs) = do
+            t' <- mkTerm [] t
+            modify (\s -> modifier (\(Constants xs) -> Constants $ n:n':xs) s)
+        process2 (Token n _ _ _ _, _, t, cs) = do
             t' <- mkTerm [] t
             cs' <- mapM addCons cs
             return $ (n, t', cs')
 
+
         -- addCons :: TyCon (Token Text) -> (Text, LamPi.Term)
-        addCons (TyCon (Token n _ _ _ _) n' e _) = do
+        addCons (TyCon (Token n _ _ _ _) Nothing e _) = do
             e' <- mkTerm [] e
             modify (\s -> modifier (\(Constants xs) -> Constants $ n:xs) s)
-            return (n, fmap unTok n', e')
-makeDecl (Def (Token n _ _ _ _) Nothing Nothing trm:xs) = do
+            return (n, e')
+        addCons (TyCon (Token n _ _ _ _) (Just (Token n' _ _ _ _)) e _) = do
+            e' <- mkTerm [] e
+            modify (\s -> modifier (\(Constants xs) -> Constants $ n:n':xs) s)
+            return (n, e')
+-- def x = e end
+makeDecl (Def n n' Nothing (Left trm):xs) = do
     trm' <- mkTerm [] trm
     xs' <- makeDecl xs
-    return $ LamPi.Def n Nothing trm':xs'
-makeDecl (Def (Token n _ _ _ _) (Just ty) (Just (Token n' _ _ _ _)) trm:xs) | n == n' = do
-    trm' <- mkTerm [] trm
+    return $ LamPi.Def (unTok n) Nothing Nothing (Left trm'):xs'
+-- def x : t where e end
+makeDecl (Def (Token n _ _ _ _) n' (Just ty) (Left trm):xs) = do
     ty' <- mkTerm [] ty
+    let vars = getVars [] ty
+    modify (\s -> modifier (\(Constants xs) -> Constants $ n:xs) s)
+    trm' <- mkTerm vars trm
     xs' <- makeDecl xs
-    return $ LamPi.Def n (Just ty') trm':xs'
-makeDecl (Def (Token n _ _ _ _) (Just ty) (Just (Token n' _ _ _ _)) trm:xs) | otherwise = error $ "name of function does not correspond to the definition"
-makeDecl (PropDef (Token n _ _ _ _) t sexp:xs) = do
+    return $ LamPi.Def n Nothing (Just ty') (Left trm'):xs'
+-- smt-builtin ...
+makeDecl (Def (Token n _ _ _ _) n' (Just ty) (Right Nothing):xs) = do
+    ty' <- mkTerm [] ty
+    modify (\s -> modifier (\(Constants xs) -> Constants $ n:xs) s)
+    xs' <- makeDecl xs
+    return $ LamPi.Def n (fmap unTok n') (Just ty') (Right Nothing):xs'
+-- smt-def
+makeDecl (Def (Token n _ _ _ _) mn (Just t) (Right (Just sexp)):xs) = do
     t' <- mkTerm [] t
     let vars = reverse $ getVars [] t
     modify (\s -> modifier (\(Constants xs) -> Constants $ n:xs) s)
     xs' <- makeDecl xs
     sexp' <- setVars vars (bimap unTok unTok sexp)
-    return $ LamPi.PropDef n t' sexp':xs'
+    return $ LamPi.Def n Nothing (Just t') (Right (Just sexp')):xs'
 
     where
         setVars vars (LamPi.NAtom n) = return $ LamPi.NAtom n
@@ -919,9 +984,9 @@ makeDecl (OptDef o:xs) = do
 makeDecl (Lang l:xs) = do
     xs' <- makeDecl xs
     return $ LamPi.Lang (unTok l):xs'
-makeDecl (RawSMT s:xs) = do
-    xs' <- makeDecl xs
-    return $ LamPi.RawSMT (unTok s):xs'
+-- makeDecl (RawSMT s:xs) = do
+--     xs' <- makeDecl xs
+--     return $ LamPi.RawSMT (unTok s):xs'
 makeDecl (TranslateDef tyN l defs:xs) = do
     xs' <- makeDecl xs
     let defs' = map (\(c,t,s) -> (mkTermTranslate c, fmap mkTermTranslate t, unTok s)) defs

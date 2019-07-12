@@ -1,6 +1,6 @@
-{-# SMT-command ('set-logic 'QF_UFSLIAFS) #-}
-{-# SMT-log-enabled true #-}
-{-# SMT-log-level 1 #-}
+-- {-# SMT-command ('set-logic 'QF_UFSLIAFS) #-}
+-- {-# SMT-log-enabled true #-}
+-- {-# SMT-log-level 1 #-}
 
 infixl 1 &&
 infix 2 ⊢ , ∈ , ∉, ≡, ⩸, ⩵
@@ -9,49 +9,26 @@ infixr 3 → , -< , >, ∷, $
 infixl 4 ∧, ∨, ;, ∪, ∩
 
 
-prop (∈) : {a : Type} -> (x : a) -> (X : Set a) -> Prop where
-  (member x X)
+smt-builtin (≡) ['=] : {a : Type} -> a -> a -> Prop end
+smt-builtin (∈) [member] : {a : Type} -> a -> Set a -> Prop end
+smt-builtin (∪) [union] : {a : Type} -> Set a -> Set a -> Set a end
+smt-builtin (∩) [intersection] : {a : Type} -> Set a -> Set a -> Set a end
+smt-builtin (\) [setminus] : {a : Type} -> Set a -> Set a -> Set a end
+smt-builtin singleton [singleton] : {a : Type} -> a -> Set a end
+
+smt-builtin (&&) [and] : Prop -> Prop -> Prop end
+smt-builtin ¬ [not] : Prop -> Prop end
+
+smt-def (∉) : {a : Type} -> (x : a) -> (X : Set a) -> Prop where
+  ('not ('member x X))
 end
 
-prop (∉) : {a : Type} -> (x : a) -> (X : Set a) -> Prop where
-  (not (member x X))
+smt-def (\\) : {a : Type} -> (X : Set a) -> (x : a) -> Set a where 
+  ('setminus X ('singleton x))
 end
 
-prop singleton : {a : Type} -> (x : a) -> Set a where 
-  (singleton x)
-end
-
-prop (≡) : {a : Type} -> (x : a) -> (y : a) -> Prop where 
-  ('= x y)
-end
-
-prop (∪) : {a : Type} -> (X : Set a) -> (Y : Set a) -> Set a where 
-  (union X Y)
-end
-
-prop (∩) : {a : Type} -> (X : Set a) -> (Y : Set a) -> Set a where 
-  (intersection X Y)
-end
-
-prop (\\) : {a : Type} -> (X : Set a) -> (x : a) -> Set a where 
-  (setminus X (singleton x))
-end
-
-prop (\) : {a : Type} -> (X : Set a) -> (Y : Set a) -> Set a where 
-  (setminus X Y)
-end
-
-
-prop infer : {a : Type} -> (x : a) -> Prop where 
+smt-def infer : {a : Type} -> (x : a) -> Prop where 
   ('= x x)
-end
-
-prop (&&) : (X : Prop) -> (Y : Prop) -> Prop where 
-  ('and X Y)
-end
-
-prop ¬ : (X : Prop) -> Prop where 
-  ('- X)
 end
 
 data Nat : * where
@@ -92,7 +69,7 @@ data Trm : Set Name -> * where
 end
 
 def empty : List {| |} Trm where
-  empty = ∅
+  ∅
 end
 
 
@@ -225,7 +202,7 @@ end
 
 
 def lemma : ↑(R 'f ∅) ⊢ ↑(∀ 'x (∘ 'x (R 'f ∅))) where
-    lemma = (AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR)))))
+    (AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR)))))
 end
 
 translate lemma to LaTeX where

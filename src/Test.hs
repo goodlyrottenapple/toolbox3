@@ -52,48 +52,48 @@ infixr 3 → , -< , >, ∷, $
 infixl 4 ∧, ∨, ;, ∪, ∩
 
 
-prop (∈) : {a : Type} -> (x : a) -> (X : Set a) -> Prop where
+smt-def (∈) : {a : Type} -> (x : a) -> (X : Set a) -> Prop where
   (member x X)
 end
 
-prop (∉) : {a : Type} -> (x : a) -> (X : Set a) -> Prop where
+smt-def (∉) : {a : Type} -> (x : a) -> (X : Set a) -> Prop where
   (not (member x X))
 end
 
-prop singleton : {a : Type} -> (x : a) -> Set a where 
+smt-def singleton : {a : Type} -> (x : a) -> Set a where 
   (singleton x)
 end
 
-prop (≡) : {a : Type} -> (x : a) -> (y : a) -> Prop where 
+smt-def (≡) : {a : Type} -> (x : a) -> (y : a) -> Prop where 
   ('= x y)
 end
 
-prop (∪) : {a : Type} -> (X : Set a) -> (Y : Set a) -> Set a where 
+smt-def (∪) : {a : Type} -> (X : Set a) -> (Y : Set a) -> Set a where 
   (union X Y)
 end
 
-prop (∩) : {a : Type} -> (X : Set a) -> (Y : Set a) -> Set a where 
+smt-def (∩) : {a : Type} -> (X : Set a) -> (Y : Set a) -> Set a where 
   (intersection X Y)
 end
 
-prop (\\) : {a : Type} -> (X : Set a) -> (x : a) -> Set a where 
+smt-def (\\) : {a : Type} -> (X : Set a) -> (x : a) -> Set a where 
   (setminus X (singleton x))
 end
 
-prop (\) : {a : Type} -> (X : Set a) -> (Y : Set a) -> Set a where 
+smt-def (\) : {a : Type} -> (X : Set a) -> (Y : Set a) -> Set a where 
   (setminus X Y)
 end
 
 
-prop infer : {a : Type} -> (x : a) -> Prop where 
+smt-def infer : {a : Type} -> (x : a) -> Prop where 
   ('= x x)
 end
 
-prop (&&) : (X : Prop) -> (Y : Prop) -> Prop where 
+smt-def (&&) : (X : Prop) -> (Y : Prop) -> Prop where 
   ('and X Y)
 end
 
-prop ¬ : (X : Prop) -> Prop where 
+smt-def ¬ : (X : Prop) -> Prop where 
   ('- X)
 end
 
@@ -135,7 +135,7 @@ data Trm : Set Name -> * where
 end
 
 def empty : List {| |} Trm where
-  empty = ∅
+  ∅
 end
 
 
@@ -299,7 +299,7 @@ end
 -- 'X ⊢ ∀ 'x (∘'x 'X)
 
 def lemma : ↑(R 'X ∅) ⊢ ↑(∀ 'x (∘ 'x (R 'X ∅))) where
-    lemma = (AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR))))) -- (AllR (Q⦿Disp2 (∘R (⦿mon (IRL IdIR)))))
+  (AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR))))) -- (AllR (Q⦿Disp2 (∘R (⦿mon (IRL IdIR)))))
 end
 
 
@@ -385,7 +385,7 @@ elab verboseFlag fName = do
   case parseG (pretokenize start_loc) infixLang $ toS s of
       Right is -> do
           let tokens = tokenize start_loc is $ toS s
-
+          -- putStrLn $ show tokens
           case parseG'' (tokenize start_loc is) (declLang is) $ toS s of
               ([], Report{..}) -> fail $ mkError $ tokens !! position
               ([x],_) -> case runSTE $ makeDecl x of

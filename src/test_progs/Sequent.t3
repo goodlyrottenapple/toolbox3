@@ -10,12 +10,12 @@ infixl 4 ∧, ∨, ;, ∪, ∩
 language LaTeX
 
 
-data [SMT] F : * where
-    At : (atom : Name) -> F
-  | (∧) [andF] : (andL:F) -> (andR:F) -> F
-  | (∨) [orF]  : (orL:F)  -> (orR:F)  -> F
-  | (→) [impF] : (impL:F) -> (impR:F) -> F
-  |  ¬  [negF] : (neg:F)  -> F
+smt-data F : * where
+    At  : (atom : Name) -> F
+  | (∧) : (andL:F) -> (andR:F) -> F
+  | (∨) : (orL:F)  -> (orR:F)  -> F
+  | (→) : (impL:F) -> (impR:F) -> F
+  |  ¬  : (neg:F)  -> F
 end
 
 translation F to LaTeX where
@@ -27,9 +27,9 @@ translation F to LaTeX where
 end
 
 
-data [SMT] List : Type -> * where
-     ∅  [nil]  : {a : Type} -> List a
-  | (∷) [cons] : {a : Type} -> (hd : a) -> (tl : List a) -> List a
+smt-data List : Type -> * where
+     ∅  : {a : Type} -> List a
+  | (∷) : {a : Type} -> (hd : a) -> (tl : List a) -> List a
 end
 
 translation List to LaTeX where
@@ -37,22 +37,16 @@ translation List to LaTeX where
   | x ∷ xs -> "\cons{#{x}}{#{xs}}"
 end
 
-prop (≡) : {a : Type} -> (x : a) -> (y : a) -> Prop where 
-  ('= x y)
+
+smt-builtin (≡) ['=] : {a : Type} -> a -> a -> Prop end
+
+smt-def (++) : (x : List F) -> (y : List F) -> List F where 
+  (ite ('= x (as '∅ (List F)))
+    y
+    ('∷ (hd x) ('++ (tl x) y))
+  )
 end
 
-smt
-(define-fun-rec concatF ((x (List F)) (y (List F))) (List F)
- (ite (= x (as nil (List F)))
-      y
-      (cons (hd x) (concatF (tl x) y))
- )
-)
-end
-
-prop (++) : (x : List F) -> (y : List F) -> List F where 
-  ('concatF x y)
-end
 
 data (⊢) : List F -> List F -> Type where
     Id : {a : Name} -> (At a) ∷ ∅ ⊢ (At a) ∷ ∅
@@ -98,7 +92,7 @@ translation (⊢) to LaTeX where
 end
 
 def test : At 'a ∨ At 'b ∷ ∅ ⊢ At 'a ∨ At 'b ∷ ∅ where
-  test = CR 
+  CR 
     (OrL 
       {∅} {∅}
       {At 'a ∨ At 'b ∷ ∅} {At 'a ∨ At 'b ∷ ∅}
@@ -106,15 +100,15 @@ def test : At 'a ∨ At 'b ∷ ∅ ⊢ At 'a ∨ At 'b ∷ ∅ where
 end
 
 
-data [SMT] Color : Type where
+smt-data Color : Type where
   Red : Color
   | Black :  Color
 end
 
 
-translate test to LaTeX where
-  output = "./out.tex"
-end
+-- translate test to LaTeX where
+--   output = "./out.tex"
+-- end
 
 
 

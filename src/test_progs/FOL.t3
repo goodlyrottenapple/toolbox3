@@ -1,4 +1,4 @@
-{-# SMT-log-enabled true #-}
+-- {-# SMT-log-enabled true #-}
 
 infixl 1 &&
 infix 2 ⊢ , ∈ , ++, ≡
@@ -9,12 +9,12 @@ infixl 4 ∧, ∨, ;, ∪, ∩
 
 language LaTeX
 
-rec data [SMT] ListT : * where
-    ∅ [nil] : ListT
-  | (∷) [cons] : (hd : Trm) -> (tl : ListT) -> ListT
+rec smt-data ListT : * where
+    ∅   : ListT
+  | (∷) : (hd : Trm) -> (tl : ListT) -> ListT
 and Trm : * where
-    V : (var: Name) -> Trm
-  | R : (nm : Name) -> (args : ListT) -> Trm
+    V : (var : Name) -> Trm
+  | R : (nm  : Name) -> (args : ListT) -> Trm
 end
 
 
@@ -28,13 +28,13 @@ translation Trm to LaTeX where
   | R n t -> "#{n}(#{t})"
 end
 
-data [SMT] F : * where
-    P : (nmF : Name) -> (trm : Trm) -> F
-  | (∧) [andF] : (andL:F) -> (andR:F) -> F
-  | (∨) [orF]  : (orL:F) -> (orR:F) -> F
-  | (→) [impF] : (impL:F) -> (impR:F) -> F
-  | ¬   [negF] : (neg:F) -> F
-  | ∀   [allF] : (allN:Name) -> (allF:F) -> F
+smt-data F : * where
+    P   : (nmF : Name) -> (trm : Trm) -> F
+  | (∧) : (andL : F) -> (andR:F) -> F
+  | (∨) : (orL : F) -> (orR:F) -> F
+  | (→) : (impL : F) -> (impR:F) -> F
+  | ¬   : (neg:F) -> F
+  | ∀   : (allN:Name) -> (allF:F) -> F
 end
 
 translation F to LaTeX where
