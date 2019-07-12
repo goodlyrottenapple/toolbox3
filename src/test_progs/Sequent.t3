@@ -13,28 +13,28 @@ language LaTeX
 data [SMT] F : * where
     At : (atom : Name) -> F
   | (∧) [andF] : (andL:F) -> (andR:F) -> F
-  | (∨) [orF] : (orL:F) -> (orR:F) -> F
+  | (∨) [orF]  : (orL:F)  -> (orR:F)  -> F
   | (→) [impF] : (impL:F) -> (impR:F) -> F
-  | ¬ [negF] : (neg:F) -> F
+  |  ¬  [negF] : (neg:F)  -> F
 end
 
 translation F to LaTeX where
-    At a -> "#{a}"
-  | (∧) a b -> "#{a} \wedge #{b}"
-  | (∨) a b -> "#{a} \vee #{b}"
-  | (→) a b -> "#{a} \to #{b}"
-  | ¬ a -> "\neg #{a}"
+    At a  -> "#{a}"
+  | a ∧ b -> "#{a} \wedge #{b}"
+  | a ∨ b -> "#{a} \vee #{b}"
+  | a → b -> "#{a} \to #{b}"
+  | ¬ a   -> "\neg #{a}"
 end
 
 
 data [SMT] List : Type -> * where
-    ∅ [nil] : {a : Type} -> List a
+     ∅  [nil]  : {a : Type} -> List a
   | (∷) [cons] : {a : Type} -> (hd : a) -> (tl : List a) -> List a
 end
 
 translation List to LaTeX where
     ∅ -> ""
-  | (∷) x xs -> "\cons{#{x}}{#{xs}}"
+  | x ∷ xs -> "\cons{#{x}}{#{xs}}"
 end
 
 prop (≡) : {a : Type} -> (x : a) -> (y : a) -> Prop where 
@@ -88,23 +88,28 @@ end
 
 
 translation (⊢) to LaTeX where
-    Id : x ⊢ y -> "\AXC{}\RightLabel{$Id$}\n\UIC{$#{x} \vdash #{y}$}"
+    Id      : x ⊢ y -> "\AXC{}\RightLabel{$Id$}\n\UIC{$#{x} \vdash #{y}$}"
   | AndL1 p : x ⊢ y -> "#{p}\RightLabel{$\sub{\wedge}{L1}$}\n\UIC{$#{x} \vdash #{y}$}"
   | AndL2 p : x ⊢ y -> "#{p}\RightLabel{$\sub{\wedge}{L2}$}\n\UIC{$#{x} \vdash #{y}$}"
-  | OrR1 p : x ⊢ y -> "#{p}\RightLabel{$\sub{\vee}{R1}$}\n\UIC{$#{x} \vdash #{y}$}"
-  | OrR2 p : x ⊢ y -> "#{p}\RightLabel{$\sub{\vee}{R2}$}\n\UIC{$#{x} \vdash #{y}$}"
+  | OrR1 p  : x ⊢ y -> "#{p}\RightLabel{$\sub{\vee}{R1}$}\n\UIC{$#{x} \vdash #{y}$}"
+  | OrR2 p  : x ⊢ y -> "#{p}\RightLabel{$\sub{\vee}{R2}$}\n\UIC{$#{x} \vdash #{y}$}"
   | OrL p q : x ⊢ y -> "#{p}\n\n#{q}\RightLabel{$\sub{\vee}{L}$}\n\BIC{$#{x} \vdash #{y}$}"
-  | CR p : x ⊢ y -> "#{p}\RightLabel{$\sub{C}{R}$}\n\UIC{$#{x} \vdash #{y}$}"
+  | CR p    : x ⊢ y -> "#{p}\RightLabel{$\sub{C}{R}$}\n\UIC{$#{x} \vdash #{y}$}"
 end
 
 def test : At 'a ∨ At 'b ∷ ∅ ⊢ At 'a ∨ At 'b ∷ ∅ where
   test = CR 
     (OrL 
-      {∅} {∅} 
-      { At 'a ∨ At 'b ∷ ∅ } { At 'a ∨ At 'b ∷ ∅ } 
+      {∅} {∅}
+      {At 'a ∨ At 'b ∷ ∅} {At 'a ∨ At 'b ∷ ∅}
       (OrR1 Id) (OrR2 Id))
 end
 
+
+data [SMT] Color : Type where
+  Red : Color
+  | Black :  Color
+end
 
 
 translate test to LaTeX where
@@ -112,6 +117,10 @@ translate test to LaTeX where
 end
 
 
--- def lemma : ↑(R 'f ∅) ⊢ ↑(∀ 'x (∘ 'x (R 'f ∅))) where
---     lemma = (AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR)))))
--- end
+
+
+
+
+
+
+

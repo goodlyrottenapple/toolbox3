@@ -20,7 +20,7 @@ end
 
 translation ListT to LaTeX where
     ∅ -> ""
-  | (∷) x xs -> "\cons{#{x}}{#{xs}}"
+  | x ∷ xs -> "\cons{#{x}}{#{xs}}"
 end
 
 translation Trm to LaTeX where
@@ -39,9 +39,9 @@ end
 
 translation F to LaTeX where
     P n t -> "#{n}(#{t})"
-  | (∧) a b -> "#{a} \wedge #{b}"
-  | (∨) a b -> "#{a} \vee #{b}"
-  | (→) a b -> "#{a} \to #{b}"
+  | a ∧ b -> "#{a} \wedge #{b}"
+  | a ∨ b -> "#{a} \vee #{b}"
+  | a → b -> "#{a} \to #{b}"
   | ¬ a -> "\neg #{a}"
   | ∀ n a -> "\forall #{n}. #{a}"
 end
