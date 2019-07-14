@@ -212,6 +212,7 @@ data Γ = Γ {
   , defs :: Map Name (Term, Type)
   , props :: Map Text (SExpr Text Int)
   , unLiftMap :: Map Text Text
+  , builtinMap :: Map Text Text
   , infixM :: Map Text Infix
   , langs :: Set Text
   , translations :: Map (Text, Name) ([ExplImpl Term], Maybe [ExplImpl Term], Text)
@@ -221,7 +222,7 @@ data Γ = Γ {
   , smtLogEnabled :: Bool
  }
 
-emptyΓ = Γ M.empty M.empty M.empty M.empty M.empty M.empty (S.fromList ["JSON"]) M.empty [] [] 0 False
+emptyΓ = Γ M.empty M.empty M.empty M.empty M.empty M.empty M.empty (S.fromList ["JSON"]) M.empty [] [] 0 False
 
 hash = T.foldl' (\h c -> 33*h `xor` fromEnum c) 5381
 
@@ -239,6 +240,8 @@ instance Show Γ where
         (intercalate "\n" $ map (\(n,e) -> toS n ++ " -> " ++ show e) $ M.toList props) ++
         "\n\n--------------------------------------------------------\n\nUnlift Map:\n" ++
         (intercalate "\n" $ map (\(n,e) -> toS n ++ " -> " ++ toS e) $ M.toList unLiftMap) ++
+        "\n\n--------------------------------------------------------\n\nBuiltin Map:\n" ++
+        (intercalate "\n" $ map (\(n,e) -> toS n ++ " -> " ++ toS e) $ M.toList builtinMap) ++
         "\n\n--------------------------------------------------------\n\nDefined Languages:\n" ++
         (intercalate "," $ map show $ S.toList langs) ++
         "\n\n--------------------------------------------------------\n\nTranslations:\n" ++
@@ -1317,7 +1320,7 @@ defineDecl ignoreCodom env (Data opt ds) = do
         return (Global n, eval t' []))
 
     env' <- foldM (\e ((n,_,xs),(_,τ)) -> do
-        (Γ tys' _ _ _ _ _ _ _ _ _ _ _) <- defineTyCon e n xs
+        (Γ tys' _ _ _ _ _ _ _ _ _ _ _ _) <- defineTyCon e n xs
         return $ e{
             types = M.insert (Global n) τ $ tys' `M.union` (types e), 
             constrs = M.insert (Global n) (S.fromList $ map (\(n,_) -> Global n) xs) (constrs e) }
@@ -1375,7 +1378,10 @@ defineDecl ignoreCodom env@Γ{..} (Def n (Just nSMT) (Just ty) (Right Nothing)) 
             let τ = eval ty' []
                 sexp = List $ (NAtom $ nSMT) : (init $ mkConProp 0 ty')
 
-            return $ env{types = M.insert (Global n) τ $ types, props = M.insert n sexp props}
+            return $ env{
+                types = M.insert (Global n) τ $ types, 
+                props = M.insert n sexp props,
+                builtinMap = M.insert n nSMT builtinMap }
 -- smt-def x : T where ... case
 defineDecl ignoreCodom env@Γ{..} (Def n _ (Just t) (Right (Just sexp))) = do
     case M.lookup (Global n) types of
@@ -1390,7 +1396,7 @@ defineDecl ignoreCodom env@Γ{..} (Def n _ (Just t) (Right (Just sexp))) = do
                         SMT.Atom nHash, 
                         toSMTSExp toS (\i -> "v" ++ show i) $ List $ mkTySig 0 t',
                         toSMTSExp toS (\i -> "v" ++ show i) $ last $ mkConProp 0 t', 
-                        toSMTSExp toS (\i -> "v" ++ show i) $ replaceWithHashed types' sexp]
+                        toSMTSExp toS (\i -> "v" ++ show i) $ replaceWithHashed builtinMap types' sexp]
                     types' = M.insert (Global n) τ $ types
                     nHash = 'n' : (show $ hash n)
                     tySig = List $ (NAtom $ toS $ nHash) : (init $ mkConProp 0 t')
@@ -1398,7 +1404,9 @@ defineDecl ignoreCodom env@Γ{..} (Def n _ (Just t) (Right (Just sexp))) = do
                     types = types',
                     props = M.insert n tySig props,
                     smtRaw = smtRaw ++ [ defFunRec ]}
-            else return $ env{types = M.insert (Global n) τ $ types, props = M.insert n sexp props}
+            else return $ env{
+                types = M.insert (Global n) τ $ types, 
+                props = M.insert n (replaceWithHashed builtinMap types sexp) props}
     where
         contains :: SExpr Text a -> Text -> Bool
         contains (NAtom n) m = n == m
@@ -1410,21 +1418,13 @@ defineDecl ignoreCodom env@Γ{..} (Def n _ (Just t) (Right (Just sexp))) = do
         mkTySig i (Π _ ty tys) = (List [VAtom i, termToSExpr i ty]) : mkTySig (i+1) tys 
         mkTySig i x = []
 
-        replaceWithHashed tys (NAtom n) = case 
-            M.lookup (Global n) tys of
-                Just _ -> NAtom $ toS $ 'n' : (show $ hash n)
-                Nothing -> NAtom n
-        replaceWithHashed tys (List xs) = List $ map (replaceWithHashed tys) xs 
-        replaceWithHashed _ x = x
-
--- defineDecl ignoreCodom env@Γ{..} (PropDef n t sexp) = do
---     case M.lookup (Global n) types of
---         Just _ -> throwError $ "constant " ++ toS n ++ " already defined"
---         Nothing -> do
---             t' <- evalTypeOf0 env t VStarT
---             let τ = eval t' []
---             -- if ignoreCodom then pure () else unless (codom t == Prop) $ throwError $ toS n ++ " data declaration should have type ... -> */Prop"
---             return $ env{types = M.insert (Global n) τ $ types, props = M.insert n sexp props}
+        replaceWithHashed builtInMap tys (NAtom n) = case 
+            (M.lookup n builtInMap , M.lookup (Global n) tys) of
+                (Just n', _) -> NAtom $ toS $ n'
+                (Nothing, Just _) -> NAtom $ toS $ 'n' : (show $ hash n)
+                _ -> NAtom $ toS n
+        replaceWithHashed builtInMap tys (List xs) = List $ map (replaceWithHashed builtInMap tys) xs 
+        replaceWithHashed _ _ x = x
 -- def x : T where ... case
 defineDecl _ env@Γ{..} (Def n _ (Just ty) (Left trm)) = do
     case (M.lookup (Global n) types, M.lookup (Global n) defs) of
@@ -1466,7 +1466,7 @@ defineDecl _ env@Γ{..} (Def n _ (Just ty) (Left trm)) = do
 defineTyCon :: (MonadIO m, MonadError String m) =>  Γ -> Text -> [(Text, Term)] -> m Γ 
 defineTyCon env@Γ{..} _ [] = return $ env{types = M.empty}
 defineTyCon env@Γ{..} n ((c, t):xs) = do
-    (Γ tys' _ _ _ _ _ _ _ _ _ _ _) <- defineTyCon env n xs
+    (Γ tys' _ _ _ _ _ _ _ _ _ _ _ _) <- defineTyCon env n xs
     case M.lookup (Global c) (types `M.union` tys') of
         Just _ -> throwError $ "constant " ++ toS c ++ " already defined"
         Nothing -> do

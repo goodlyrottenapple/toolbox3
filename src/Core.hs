@@ -593,7 +593,12 @@ var reserved = satisfy (\t ->
          -- &&
         -- (isLower head_letter || head_letter == '_'))
         
-
+varOp :: HS.HashSet Text -> Prod r e (Token Text) (Token Text)
+varOp reserved = satisfy (\t -> 
+    let str = unTok t
+    in
+        (str `HS.member` reserved) &&
+        T.length str > 0)
 
 
 
@@ -683,22 +688,54 @@ expLang infxLst = mdo
 sExpLang :: [LamPi.Infix] -> G (LamPi.SExpr (Token Text) (Token Text))
 sExpLang infxLst = mdo
     varR <- rule $ LamPi.VAtom <$> var (HS.fromList $ reservedKeywords ++ map symb infxLst)
-
     nameR <- rule $ 
             LamPi.NAtom <$> (namedToken "\'" *> satisfy (\s -> True))
+    infixR <- rule $ LamPi.NAtom <$> varOp (HS.fromList $ map symb infxLst)
 
-    listRAux <- rule $ (:[]) <$> varR
+    listRAux <- rule $ 
+            (:[]) <$> varR
         <|> (:[]) <$> nameR
         <|> (:[]) <$> listR
         <|> (:) <$> atom <*> listRAux
-        -- <|> (:) <$> nameR <*> listRAux
-        -- <|> (:) <$> (namedToken "(" *> listR <* namedToken ")") <*> listRAux
+        <|> (\a op b -> [op, a, b]) <$> atom <*> infixR <*> atom
 
     listR <- rule $ LamPi.List <$> (namedToken "(" *> listRAux <* namedToken ")")
 
     atom <- rule $ varR <|> nameR <|> listR
-        
     return atom
+
+
+-- sExpLang :: [LamPi.Infix] -> G (LamPi.SExpr (Token Text) (Token Text))
+-- sExpLang infxLst = mdo
+--     varR <- rule $ LamPi.VAtom <$> var (HS.fromList $ reservedKeywords ++ map symb infxLst)
+
+--     -- nameR <- rule $ 
+--     --         LamPi.NAtom <$> (namedToken "\'" *> satisfy (\s -> True))
+
+--     atom <- rule $ varR
+--         -- <|> nameR
+--         <|> namedToken "(" *> expr <* namedToken ")"
+--     appR <- rule $ 
+--             atom 
+--         <|> LamPi.List <$> many atom -- (e .. e) (e) / A (e)
+--         -- <|> (:|$|:) <$> appR <*> (namedToken "{" *> atom <* namedToken "}")
+
+--     expr <- mixfixExpression table appR appFun
+--     return atom
+--     where
+--         appFun :: Holey (Token Text) -> [LamPi.SExpr (Token Text) (Token Text)] -> LamPi.SExpr (Token Text) (Token Text)
+--         appFun [Nothing,Just t, Nothing] xs = LamPi.List $ (LamPi.NAtom t) : xs
+
+--         table :: [[(Holey (Prod r (Token Text) (Token Text) (Token Text)), Associativity)]]
+--         table = map (map infixToHoley) sortedXs
+--             where
+--                 xs :: [[LamPi.Infix]]
+--                 xs = groupBy (\a b -> (precedence a) == (precedence b)) infxLst
+                
+--                 sortedXs = sortBy (\a b -> compare (precedence (head a)) (precedence (head b))) xs
+
+--                 infixToHoley :: LamPi.Infix -> (Holey (Prod r (Token Text) (Token Text) (Token Text)), Associativity)
+--                 infixToHoley LamPi.Infix{..} = ([Nothing, Just $ namedToken $ tok symb, Nothing],assoc)
 
 
 

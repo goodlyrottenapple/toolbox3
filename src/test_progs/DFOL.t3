@@ -14,21 +14,21 @@ smt-builtin (∈) [member] : {a : Type} -> a -> Set a -> Prop end
 smt-builtin (∪) [union] : {a : Type} -> Set a -> Set a -> Set a end
 smt-builtin (∩) [intersection] : {a : Type} -> Set a -> Set a -> Set a end
 smt-builtin (\) [setminus] : {a : Type} -> Set a -> Set a -> Set a end
-smt-builtin singleton [singleton] : {a : Type} -> a -> Set a end
+smt-builtin sing [singleton] : {a : Type} -> a -> Set a end
 
 smt-builtin (&&) [and] : Prop -> Prop -> Prop end
 smt-builtin ¬ [not] : Prop -> Prop end
 
 smt-def (∉) : {a : Type} -> (x : a) -> (X : Set a) -> Prop where
-  ('not ('member x X))
+  (¬ (x ∈ X))
 end
 
 smt-def (\\) : {a : Type} -> (X : Set a) -> (x : a) -> Set a where 
-  ('setminus X ('singleton x))
+  (X \ (sing x))
 end
 
 smt-def infer : {a : Type} -> (x : a) -> Prop where 
-  ('= x x)
+  (x ≡ x)
 end
 
 data Nat : * where
@@ -68,9 +68,7 @@ data Trm : Set Name -> * where
   | fun : {𝓝 : Set Name} -> Name -> List 𝓝 Trm -> Trm 𝓝
 end
 
-def empty : List {| |} Trm where
-  ∅
-end
+def empty : List {| |} Trm where ∅ end
 
 
 data SubstList : Set Name -> Set Name -> (Set Name -> *) -> * where
@@ -83,60 +81,59 @@ data SubstList : Set Name -> Set Name -> (Set Name -> *) -> * where
         -- [ x ∉ 𝓝 && x ∉ 𝓝₁₁ && x ∉ 𝓝₂₁ ] -> 
         [ x ∉ 𝓝 && x ∉ 𝓝₁₁ ] -> 
         (s : τ 𝓝) -> SubstList 𝓝₁₁ 𝓝₂₁ τ -> 
-        [𝓝₁₂ ≡ 𝓝₁₁ ∪ (singleton x) && 𝓝₂₂ ≡ 𝓝₂₁ ∪ 𝓝] -> 
+        [𝓝₁₂ ≡ 𝓝₁₁ ∪ (sing x) && 𝓝₂₂ ≡ 𝓝₂₁ ∪ 𝓝] -> 
         SubstList 𝓝₁₂ 𝓝₂₂ τ
 end
 
 
 data F : Set Name -> * where
-    R : Name -> {𝓝 : Set Name} -> List 𝓝 Trm -> F 𝓝
-  | (⩵) : {𝓝 : Set Name} -> Trm 𝓝 -> Trm 𝓝 -> F 𝓝
-  | ⊤ : {𝓝 : Set Name} -> F 𝓝
-  | ⊥ : {𝓝 : Set Name} -> F 𝓝
-  | (∧) : {𝓝 : Set Name} -> F 𝓝 -> F 𝓝 -> F 𝓝
-  | (∨) : {𝓝 : Set Name} -> F 𝓝 -> F 𝓝 -> F 𝓝
-  | (→) : {𝓝 : Set Name} -> F 𝓝 -> F 𝓝 -> F 𝓝
+    R    : Name -> {𝓝 : Set Name} -> List 𝓝 Trm -> F 𝓝
+  | (⩵)  : {𝓝 : Set Name} -> Trm 𝓝 -> Trm 𝓝 -> F 𝓝
+  | ⊤    : {𝓝 : Set Name} -> F 𝓝
+  | ⊥    : {𝓝 : Set Name} -> F 𝓝
+  | (∧)  : {𝓝 : Set Name} -> F 𝓝 -> F 𝓝 -> F 𝓝
+  | (∨)  : {𝓝 : Set Name} -> F 𝓝 -> F 𝓝 -> F 𝓝
+  | (→)  : {𝓝 : Set Name} -> F 𝓝 -> F 𝓝 -> F 𝓝
   | (-<) : {𝓝 : Set Name} -> F 𝓝 -> F 𝓝 -> F 𝓝
-  | ∀ : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> (x : Name) -> [ x ∈ 𝓝 ] -> F 𝓝 -> [ 𝓝₂ ≡ 𝓝 \\ x ] -> F 𝓝₂
-  | ∃ : (x : Name) -> {𝓝 : Set Name} -> [ x ∈ 𝓝 ] -> F 𝓝 -> {𝓝₂ : Set Name} -> [ 𝓝₂ ≡ 𝓝 \\ x ] -> F 𝓝₂
-  | ∘ : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> (x : Name) -> [ x ∉ 𝓝 ] -> F 𝓝 -> [ 𝓝₂ ≡ 𝓝 ∪ (singleton x) ] -> F 𝓝₂
+  | ∀    : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> (x : Name) -> [ x ∈ 𝓝 ] -> F 𝓝 -> [ 𝓝₂ ≡ 𝓝 \\ x ] -> F 𝓝₂
+  | ∃    : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> (x : Name) -> [ x ∈ 𝓝 ] -> F 𝓝 -> [ 𝓝₂ ≡ 𝓝 \\ x ] -> F 𝓝₂
+  | ∘    : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> (x : Name) -> [ x ∉ 𝓝 ] -> F 𝓝 -> [ 𝓝₂ ≡ 𝓝 ∪ (sing x) ] -> F 𝓝₂
   | subst : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> SubstList 𝓝 𝓝₂ Trm -> F 𝓝 -> F 𝓝₂
 end
 
 translation F to LaTeX where
-    R n lst -> "#{n}(#{lst})"
+    R n lst  -> "#{n}(#{lst})"
   | (⩵) a b -> "#{a} = #{b}"
-  | ⊤ -> "\top"
-  | ⊥ -> "\bot"
+  | ⊤       -> "\top"
+  | ⊥       -> "\bot"
   | (∧) a b -> "#{a} \wedge #{b}"
   | (∨) a b -> "#{a} \vee #{b}"
   | (→) a b -> "#{a} \to #{b}"
-  | ∀ x a -> "\forall #{x}.\,#{a}"
-  | ∘ x a -> "\sub{\circ}{\!#{x}} #{a}"
+  | ∀ x a   -> "\forall #{x}.\,#{a}"
+  | ∘ x a   -> "\sub{\circ}{\!#{x}} #{a}"
 end
 
 data S : Set Name -> * where
-    ↑ : {𝓝 : Set Name} -> F 𝓝 -> S 𝓝
+    ↑   : {𝓝 : Set Name} -> F 𝓝 -> S 𝓝
   | Ieq : {𝓝 : Set Name} -> Trm 𝓝 -> Trm 𝓝 -> S 𝓝
-  | I : {𝓝 : Set Name} -> S 𝓝
-  | IR : Name -> {𝓝 : Set Name} -> List 𝓝 Trm -> S 𝓝
+  | I   : {𝓝 : Set Name} -> S 𝓝
+  | IR  : Name -> {𝓝 : Set Name} -> List 𝓝 Trm -> S 𝓝
   | (;) : {𝓝 : Set Name} -> S 𝓝 -> S 𝓝 -> S 𝓝
   | (>) : {𝓝 : Set Name} -> S 𝓝 -> S 𝓝 -> S 𝓝
-  
-  | Q : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> (x : Name) -> [ x ∈ 𝓝 ] -> S 𝓝 -> [ 𝓝₂ ≡ 𝓝 \\ x ] -> S 𝓝₂
-  | ⊙ : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> (x : Name) -> [ x ∉ 𝓝 ] -> S 𝓝 -> [ 𝓝₂ ≡ 𝓝 ∪ (singleton x) ] -> S 𝓝₂
+  | Q   : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> (x : Name) -> [ x ∈ 𝓝 ] -> S 𝓝 -> [ 𝓝₂ ≡ 𝓝 \\ x ] -> S 𝓝₂
+  | ⊙   : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> (x : Name) -> [ x ∉ 𝓝 ] -> S 𝓝 -> [ 𝓝₂ ≡ 𝓝 ∪ (sing x) ] -> S 𝓝₂
   | substS : {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> SubstList 𝓝₂ 𝓝₂ Trm -> S 𝓝 -> S 𝓝₂
 end
 
 
 translation S to LaTeX where
-    ↑ f -> "#{f}"
-  | I -> "\mathbb{I}"
+    ↑ f      -> "#{f}"
+  | I        -> "\mathbb{I}"
   | IR n lst -> "\bf{#{n}}(#{lst})"
-  | (;) s t -> "#{s} ; #{t}"
-  | (>) s t -> "#{s} > #{t}"
-  | Q x s -> "\bf{Q}#{x}.\,#{s}"
-  | ⊙ x s -> "\sub{\bigcirc}{\!#{x}} #{s}"
+  | (;) s t  -> "#{s} ; #{t}"
+  | (>) s t  -> "#{s} > #{t}"
+  | Q x s    -> "\bf{Q}#{x}.\,#{s}"
+  | ⊙ x s    -> "\sub{\bigcirc}{\!#{x}} #{s}"
 
 end
 
@@ -144,8 +141,8 @@ end
 data (⊢) : {𝓝 : Set Name} -> S 𝓝 -> S 𝓝 -> Type where
   IdIR    : {r : Name} -> {𝓝 : Set Name} -> {ts : List 𝓝 Trm} -> 
 
-            --------------------
-            IR r ts ⊢ ↑ (R r ts) 
+          --------------------
+          IR r ts ⊢ ↑ (R r ts) 
   |
   AllR    : {𝓝ₓ : Set Name} -> {𝓝ₐ : Set Name} -> 
             {X : S 𝓝ₓ} -> {x : Name} -> {A : F 𝓝ₐ} -> 
@@ -157,37 +154,37 @@ data (⊢) : {𝓝 : Set Name} -> S 𝓝 -> S 𝓝 -> Type where
   Q⊙Disp  : {𝓝ₓ : Set Name} -> {𝓝ᵧ : Set Name} -> 
             {X : S 𝓝ₓ} -> {Y : S 𝓝ᵧ} -> {x : Name} ->
 
-            Y ⊢ Q x X ->
-            ---------
-            ⊙ x Y ⊢ X
+          Y ⊢ Q x X ->
+          ---------
+          ⊙ x Y ⊢ X
   | 
   Q⊙Disp2 : {𝓝ₓ : Set Name} -> {𝓝ᵧ : Set Name} -> 
             {X : S 𝓝ₓ} -> {Y : S 𝓝ᵧ} -> {x : Name} ->
 
-            (⊙ x Y) ⊢ X ->
-            -----------
-            Y ⊢ (Q x X)
+          (⊙ x Y) ⊢ X ->
+          -----------
+          Y ⊢ (Q x X)
   | 
   ∘R :     {𝓝ₓ : Set Name} -> {𝓝ₐ : Set Name} -> 
-         {X : S 𝓝ₓ} -> {x : Name} -> {A : F 𝓝ₐ} -> 
+           {X : S 𝓝ₓ} -> {x : Name} -> {A : F 𝓝ₐ} -> 
 
-           X ⊢ ⊙ x (↑ A) ->
-           -------------
-           X ⊢ ↑ (∘ x A)
+          X ⊢ ⊙ x (↑ A) ->
+          -------------
+          X ⊢ ↑ (∘ x A)
   | 
   ⊙mon :   {𝓝 : Set Name} -> {𝓝₂ : Set Name} -> 
            {X : S 𝓝} -> {Y : S 𝓝} -> {x : Name} ->
 
-                  X ⊢ Y -> 
-         -----------------------
-         ⊙ {𝓝} {𝓝₂} x X ⊢ ⊙ x Y
+                   X ⊢ Y -> 
+          ------------------------
+          ⊙ {𝓝} {𝓝₂} x X ⊢ ⊙ x Y
   | 
   IRL :    {r : Name} -> {𝓝 : Set Name} -> 
            {X : S 𝓝} -> {ts : List 𝓝 Trm} -> 
 
-         IR r ts ⊢ X ->
-         --------------
-         ↑ (R r ts) ⊢ X
+          IR r ts ⊢ X ->
+          --------------
+          ↑ (R r ts) ⊢ X
 end
 
 
@@ -202,7 +199,7 @@ end
 
 
 def lemma : ↑(R 'f ∅) ⊢ ↑(∀ 'x (∘ 'x (R 'f ∅))) where
-    (AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR)))))
+    AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR))))
 end
 
 translate lemma to LaTeX where

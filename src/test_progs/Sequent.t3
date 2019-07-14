@@ -1,10 +1,10 @@
 -- {-# SMT-log-enabled true #-}
 
 infixl 1 &&
-infix 2 ⊢ , ∈ , ++, ≡
+infix 2 ⊢ , ∈ , ++, ≡, ∷
 infix 3 \\ , \
-infixr 3 → , -< , >, ∷, $
-infixl 4 ∧, ∨, ;, ∪, ∩
+infixr 3 → , -< , >, ;, $
+infixl 4 ∧, ∨, ∪, ∩
 
 
 language LaTeX
@@ -12,10 +12,10 @@ language LaTeX
 
 smt-data F : * where
     At  : (atom : Name) -> F
-  | (∧) : (andL:F) -> (andR:F) -> F
-  | (∨) : (orL:F)  -> (orR:F)  -> F
-  | (→) : (impL:F) -> (impR:F) -> F
-  |  ¬  : (neg:F)  -> F
+  | (∧) : (andL : F) -> (andR : F) -> F
+  | (∨) : (orL  : F) -> (orR  : F) -> F
+  | (→) : (impL : F) -> (impR : F) -> F
+  |  ¬  : (neg  : F) -> F
 end
 
 translation F to LaTeX where
@@ -29,55 +29,57 @@ end
 
 smt-data List : Type -> * where
      ∅  : {a : Type} -> List a
-  | (∷) : {a : Type} -> (hd : a) -> (tl : List a) -> List a
+  | (;) : {a : Type} -> (hd : a) -> (tl : List a) -> List a
 end
 
 translation List to LaTeX where
     ∅ -> ""
-  | x ∷ xs -> "\cons{#{x}}{#{xs}}"
+  | x ; xs -> "\cons{#{x}}{#{xs}}"
 end
 
 
 smt-builtin (≡) ['=] : {a : Type} -> a -> a -> Prop end
+smt-builtin (∷) [as] : {a : Type} -> a -> Type -> a end
 
 smt-def (++) : (x : List F) -> (y : List F) -> List F where 
-  (ite ('= x (as '∅ (List F)))
+  (ite ( x ≡ (∅ ∷ (List F)) )
     y
-    ('∷ (hd x) ('++ (tl x) y))
+    ( (hd x) ; ((tl x) ++ y) )
   )
 end
 
 
+
 data (⊢) : List F -> List F -> Type where
-    Id : {a : Name} -> (At a) ∷ ∅ ⊢ (At a) ∷ ∅
+    Id : {a : Name} -> (At a) ; ∅ ⊢ (At a) ; ∅
   | AndL1 : {Γ : List F} -> {Δ : List F} -> {A : F} -> {B : F} ->
-         A ∷ Γ ⊢ Δ ->
+         A ; Γ ⊢ Δ ->
       ---------------
-      (A ∧ B) ∷ Γ ⊢ Δ
+      (A ∧ B) ; Γ ⊢ Δ
   | AndL2 : {Γ : List F} -> {Δ : List F} -> {A : F} -> {B : F} ->
-         B ∷ Γ ⊢ Δ ->
+         B ; Γ ⊢ Δ ->
       ---------------
-      (A ∧ B) ∷ Γ ⊢ Δ
+      (A ∧ B) ; Γ ⊢ Δ
   | OrR1 : {Γ : List F} -> {Δ : List F} -> {A : F} -> {B : F} ->
-         Γ ⊢ A ∷ Δ ->
+         Γ ⊢ A ; Δ ->
       ---------------
-      Γ ⊢ (A ∨ B) ∷ Δ
+      Γ ⊢ (A ∨ B) ; Δ
   | OrR2 : {Γ : List F} -> {Δ : List F} -> {A : F} -> {B : F} ->
-         Γ ⊢ B ∷ Δ ->
+         Γ ⊢ B ; Δ ->
       ---------------
-      Γ ⊢ (A ∨ B) ∷ Δ
+      Γ ⊢ (A ∨ B) ; Δ
   | OrL : {Γ₁ : List F} -> {Γ₂ : List F} -> 
           {Δ₁ : List F} -> {Δ₂ : List F} -> 
           {Γ : List F} -> [Γ ≡ (Γ₁ ++ Γ₂)] -> 
           {Δ : List F} -> [Δ ≡ (Δ₁ ++ Δ₂)] -> 
           {A : F} -> {B : F} ->
-      (A ∷ Γ₁) ⊢ Δ₁ -> (B ∷ Γ₂) ⊢ Δ₂ -> 
+      (A ; Γ₁) ⊢ Δ₁ -> (B ; Γ₂) ⊢ Δ₂ -> 
       ------------------------------
-              (A ∨ B) ∷ Γ ⊢ Δ
+              (A ∨ B) ; Γ ⊢ Δ
   | CR : {Γ : List F} -> {Δ : List F} -> {A : F} ->
-      Γ ⊢ A ∷ A ∷ Δ ->
+      Γ ⊢ A ; A ; Δ ->
       -------------
-        Γ ⊢ A ∷ Δ
+        Γ ⊢ A ; Δ
 end
 
 
@@ -91,18 +93,12 @@ translation (⊢) to LaTeX where
   | CR p    : x ⊢ y -> "#{p}\RightLabel{$\sub{C}{R}$}\n\UIC{$#{x} \vdash #{y}$}"
 end
 
-def test : At 'a ∨ At 'b ∷ ∅ ⊢ At 'a ∨ At 'b ∷ ∅ where
+def test : At 'a ∨ At 'b ; ∅ ⊢ At 'a ∨ At 'b ; ∅ where
   CR 
     (OrL 
       {∅} {∅}
-      {At 'a ∨ At 'b ∷ ∅} {At 'a ∨ At 'b ∷ ∅}
+      {At 'a ∨ At 'b ; ∅} {At 'a ∨ At 'b ; ∅}
       (OrR1 Id) (OrR2 Id))
-end
-
-
-smt-data Color : Type where
-  Red : Color
-  | Black :  Color
 end
 
 
