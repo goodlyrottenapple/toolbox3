@@ -46,15 +46,22 @@ import Data.IORef(newIORef, atomicModifyIORef, modifyIORef', readIORef,
 import           Text.Earley.Mixfix(Associativity(..))
 
 import Data.Bits(xor)
+import System.IO.Unsafe
 
 infixl 7 :@:
 
-debugMode = False
+debugMode = unsafePerformIO $ newIORef False
 -- smtLogMode = True
 
 showImpl = False
 
-debug = if debugMode then flip trace else (\a _ -> a)
+{-# NOINLINE debug #-}
+debug :: a -> String -> a
+debug a str = unsafePerformIO $ do
+  dbFlag <- readIORef debugMode
+  if dbFlag then putStrLn str
+  else return ()
+  return a
 
 data ExplImpl a = I a | E a deriving (Show, Eq, Ord, Data, Functor, Generic, ToJSON)
 
