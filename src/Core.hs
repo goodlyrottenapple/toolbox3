@@ -623,7 +623,7 @@ reservedKeywords =
     ["\"", "(", ")", "{|", "|}", "{", "}", "[", "]", "=>", "->", ":", ",", "\'", "?", "=", "_",  --, "true", "false", 
         -- "SMT-command", "SMT-log-level", "SMT-log-enabled", "language", "translate", "to", "bind",
         -- "end", "where", , "infix", "infixl", "infixr"
-        "smt-data", "smt-builtin", "data", "rec", "smt-def", "def", "|"] 
+        "smt-data", "smt-builtin", "data", "rec", "smt-def", "def", "|", "translate"] 
 
 bracketed :: (Eq b, IsString b) => Prod r b b a -> Prod r b b a
 bracketed x = namedToken "(" *> x <* namedToken ")"
@@ -847,7 +847,8 @@ declLang infxLst = mdo
         (namedToken "where" *> translateConsR <* namedToken "end")
 
     translate <- rule $ TranslateApp <$> (namedToken "translate" *> name) <*> (namedToken "to" *> langName) <*>
-        (namedToken "where" *> namedToken "output" *> namedToken "=" *> stringR <* namedToken "end")
+        -- (namedToken "where" *> namedToken "output" *> namedToken "=" *> stringR 
+        (pure "" <* namedToken "end")
 
     expAppOnlyR   <- expLangAppOnly infxLst
 

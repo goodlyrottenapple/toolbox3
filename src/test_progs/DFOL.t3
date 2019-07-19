@@ -202,9 +202,7 @@ def lemma : ↑(R 'f ∅) ⊢ ↑(∀ 'x (∘ 'x (R 'f ∅))) where
     AllR (Q⊙Disp2 (∘R (⊙mon (IRL IdIR))))
 end
 
-translate lemma to LaTeX where
-  output = "./out.tex"
-end
+translate lemma to LaTeX end
 
 -- translate lemma to JSON where
 --   output = "./out.tex"

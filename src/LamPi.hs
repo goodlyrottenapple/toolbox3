@@ -482,9 +482,12 @@ elabType (Π n ρ ρ') = do
     -- we only define bound vars that have a SAT representation
     case toSExprMaybe smap setDefs ρ of
         Just sexpr -> do
-            (SMTSolver proc) <- getHas `debug` ("found bound " ++ show i ++ " : " ++ pprint infM ρ)
-            liftIO $ SMT.declare proc ("L" ++ show i) sexpr
-            return ()
+            (SMTSolver procMaybe) <- getHas `debug` ("found bound " ++ show i ++ " : " ++ pprint infM ρ)
+            case procMaybe of 
+              Just proc -> do
+                liftIO $ SMT.declare proc ("L" ++ show i) sexpr
+                return ()
+              Nothing -> return ()
         Nothing ->
             return () `debug` ("Could not convert " ++ pprint infM  ρ ++ " to SExpr.")
             
@@ -683,7 +686,7 @@ unifyConstraints ((M x, M y):xs) acc flag m = case (M.lookup x m, M.lookup y m) 
 unifyConstraints ((M x, y):xs)                       acc flag  m 
     | doesNotContainMetas y = unifyConstraints xs acc True $ M.insert x y m `debug` ("unify : " ++ pprintE (M x, y))
     | otherwise = case M.lookup x m of
-        Just tx -> unifyConstraints xs ((tx, y):acc) flag m `debug` ("unify oterwise : " ++ pprintE (M x, y))
+        Just tx -> unifyConstraints xs ((tx, y):acc) flag m `debug` ("unify otherwise : " ++ pprintE (M x, y))
         Nothing -> unifyConstraints xs ((M x, y):acc) flag m 
 unifyConstraints ((x, M y):xs)                       acc flag  m = unifyConstraints ((M y,x):xs) acc flag m
 unifyConstraints ((StarT, StarT):xs)                   acc flag  m = unifyConstraints xs acc flag m
@@ -756,7 +759,7 @@ mkMap (_:xs) = mkMap xs
 
 newtype SATDefs = SATDefs { unSATDefs :: Set Int } deriving (Eq, Show)
 
-newtype SMTSolver = SMTSolver { unSMTSolver :: SMT.Solver }
+newtype SMTSolver = SMTSolver { unSMTSolver :: Maybe SMT.Solver }
 
 getHas :: (Has a s, MonadState s m) => m a
 getHas = getter <$> get
@@ -841,9 +844,12 @@ defineMetas (M n) = do
         (SATDefs satDefs) <- getHas
         case toSExprMaybe smap (S.insert n satDefs) $ quote0 τ of
             Just sexpr -> do
-                (SMTSolver proc) <- getHas `debug` ("found meta " ++ show n ++ " : " ++ pprint infM τ)
-                liftIO $ SMT.declare proc ("M" ++ show n) sexpr
-                addToSATDefs n
+                (SMTSolver procMaybe) <- getHas `debug` ("found meta " ++ show n ++ " : " ++ pprint infM τ)
+                case procMaybe of
+                  Just proc -> do
+                    liftIO $ SMT.declare proc ("M" ++ show n) sexpr
+                    addToSATDefs n
+                  Nothing -> return ()
             Nothing ->
                 return () `debug` ("Could not convert " ++ show (quote0 τ) ++ " to SExpr.")
                 
@@ -866,51 +872,53 @@ checkSMT trm = do
     -- translate to sat, first defining all meta variables
     mapM_ defineMetas satcs'
     infM <- getInfM
-    (SMTSolver proc) <- getHas `debug` ("produced following sat goals: " ++ pprint infM satcs')
-    smap <- getSExprMap
-    -- mapM_ (\s -> liftIO $ SMT.assert proc $ toSExpr smap s) satcs'
-    mapM_ (\(s,i) -> do
-        (SATDefs setDefs) <- getHas
-        -- let sexpr = eliminateBrackets $ 
-        case toSExprMaybe smap setDefs s of
-            Just sexpr -> 
-                liftIO $ SMT.assert proc $ SMT.named ('_':show i) sexpr
-            Nothing -> 
-                return () `debug` (pprint infM s ++ " could not be added as it contains undefined metas.")
-        ) (zip satcs' [0..])
-        
-
-    -- check sat
-    (SMTSolver proc) <- getHas
-    r <- liftIO $ SMT.check proc
-    case r of
-        SMT.Sat -> do
-            (SATDefs defined) <- getHas
-            forM_ (S.toList defined) (\d -> do
-                (SMT.Other v) <- liftIO $ SMT.getExpr proc (SMT.const $ "M" ++ pprint infM d)
-                τ <- lookupInΓ (Meta d) `debug` ("\n\nSMT returned: " ++ show v)
-
-                Γ{..} <- getter <$> get
-                case fromSExprMaybe unLiftMap v τ of
-                    Just vt -> do
-                        -- Because vt was translated back from SMT, it's not fully typed,
-                        -- namely it does not contain any of the implicit arguments.
-                        -- Calling typeOf will elaborate vt and add these, so that we get
-                        -- a well formed/typed term.
-                        vt' <- typeOf vt τ
-                        addToConstrList $ ConstrList [(M d,vt')] `debug` ("\n\nadding const: " ++ pprint infM (M d,vt))
-                    Nothing -> pure () `debug` ("\n\ncould not translate: " ++ SMT.showsSExpr v "" ++ " back."))
-        SMT.Unsat -> do 
-            (SMT.List res) <- liftIO $ SMT.command proc (SMT.List [ SMT.Atom "get-unsat-core" ])
-            let unsat_core = map (\(SMT.Atom (_:num)) -> (read num :: Int)) res
-            σ <- unifyConstraintsPart cs [] False M.empty -- `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
+    (SMTSolver procMaybe) <- getHas `debug` ("produced following sat goals: " ++ pprint infM satcs')
+    case procMaybe of
+      Nothing -> return ()
+      Just proc -> do
+        smap <- getSExprMap
+        -- mapM_ (\s -> liftIO $ SMT.assert proc $ toSExpr smap s) satcs'
+        mapM_ (\(s,i) -> do
+            (SATDefs setDefs) <- getHas
+            -- let sexpr = eliminateBrackets $ 
+            case toSExprMaybe smap setDefs s of
+                Just sexpr -> 
+                    liftIO $ SMT.assert proc $ SMT.named ('_':show i) sexpr
+                Nothing -> 
+                    return () `debug` (pprint infM s ++ " could not be added as it contains undefined metas.")
+            ) (zip satcs' [0..])
             
-            throwError $ "The following constraints are unsatisfiable:\n" ++
-                (intercalate "\n" $ map (\i -> "- " ++ (pprint infM $ substMetas σ $ satcs' !! i)) unsat_core) ++
-                "\nin the term:\n" ++ pprint infM trm
 
-        _ -> throwError $ "unknown result"
+        -- check sat
+        -- (SMTSolver proc) <- getHas
+        r <- liftIO $ SMT.check proc
+        case r of
+            SMT.Sat -> do
+                (SATDefs defined) <- getHas
+                forM_ (S.toList defined) (\d -> do
+                    (SMT.Other v) <- liftIO $ SMT.getExpr proc (SMT.const $ "M" ++ pprint infM d)
+                    τ <- lookupInΓ (Meta d) `debug` ("\n\nSMT returned: " ++ show v)
 
+                    Γ{..} <- getter <$> get
+                    case fromSExprMaybe unLiftMap v τ of
+                        Just vt -> do
+                            -- Because vt was translated back from SMT, it's not fully typed,
+                            -- namely it does not contain any of the implicit arguments.
+                            -- Calling typeOf will elaborate vt and add these, so that we get
+                            -- a well formed/typed term.
+                            vt' <- typeOf vt τ
+                            addToConstrList $ ConstrList [(M d,vt')] `debug` ("\n\nadding const: " ++ pprint infM (M d,vt))
+                        Nothing -> pure () `debug` ("\n\ncould not translate: " ++ SMT.showsSExpr v "" ++ " back."))
+            SMT.Unsat -> do 
+                (SMT.List res) <- liftIO $ SMT.command proc (SMT.List [ SMT.Atom "get-unsat-core" ])
+                let unsat_core = map (\(SMT.Atom (_:num)) -> (read num :: Int)) res
+                σ <- unifyConstraintsPart cs [] False M.empty -- `debug` ("\n\nelabType0 constraints: " ++ show cs' ++ "\nmkMap cs = " ++ show (mkMap cs) ++ "\n sat constraints: " ++ show satcs' )
+                
+                throwError $ "The following constraints are unsatisfiable:\n" ++
+                    (intercalate "\n" $ map (\i -> "- " ++ (pprint infM $ substMetas σ $ satcs' !! i)) unsat_core) ++
+                    "\nin the term:\n" ++ pprint infM trm
+
+            _ -> throwError $ "unknown result"
 
 
 
@@ -1039,10 +1047,13 @@ runElabType0 :: (MonadIO m, MonadError String m) => Bool -> Γ -> Term -> m (Ter
 runElabType0 canContainMetas g t = do
     smt <- runReaderT initSMT g
 
-    res <- (flip evalStateT (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt)) $ elabType0 canContainMetas t
+    res <- (flip evalStateT (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver (Just smt))) $ elabType0 canContainMetas t
     liftIO $ SMT.stop smt
     return res
 
+runElabType0NoSMT :: (MonadIO m, MonadError String m) => Γ -> Term -> m (Term, Type)
+runElabType0NoSMT g t =
+    (flip evalStateT (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver Nothing)) $ elabType0 False t
 
 
 typeOf0 :: (Has BVCounter s, Has MetaCounter s, Has Γ s, Has ConstrList s, Has SATConstrList s, Has SATDefs s,
@@ -1074,7 +1085,7 @@ evalTypeOf0 :: (MonadError String m, MonadIO m) => Γ -> Term -> Type -> m Term
 evalTypeOf0 g t τ = do
     smt <- runReaderT initSMT g
 
-    res <- flip evalStateT (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver smt) $ typeOf0 t τ
+    res <- flip evalStateT (BVCounter 0,MetaCounter 0,g,ConstrList [],SATConstrList [], SATDefs S.empty, SMTSolver (Just smt)) $ typeOf0 t τ
 
     liftIO $ SMT.stop smt
     return res
@@ -1358,8 +1369,8 @@ defineDecl _ env@Γ{..} (TranslateApp d l fp) = do
     case M.lookup (Global d) defs of
         Just (trm, ty) -> do
             str <- translate env l trm (quote0 ty)
-            liftIO $ putStrLn $ "\n\n-------------------------------------------\n" ++ "output:\n" ++
-                toS str ++ "\n-------------------------------------------\n\n"
+            liftIO $ putStrLn $ "\n\n-------------------------------------------\n" ++ "Translation of " ++ toS d ++ " to " ++ toS l ++ ":\n\n" ++
+                toS str ++ "\n\n-------------------------------------------\n\n"
 
         Nothing -> throwError $ "Def " ++ toS d ++ " does not exist."
     return env
@@ -1577,12 +1588,16 @@ translate env@Γ{..} l trm ty = do
             Γ -> Text -> [ExplImpl Term] -> m [ExplImpl Text]
         translateExpImpApp _ _ [] = return []
         translateExpImpApp env l (E t:xs) = do
-            (_, ty) <- runElabType0 False env t `debug` ("Elab: " ++ pprint infixM t)
+            -- We call elabType because we want to find out the type of each sub-expression.
+            -- As these terms are fully elaborated, we can assume that the side-conditions
+            -- checked by the SMT solver hold and thus don't need to be re-checked.
+            -- This vastly speeds up the process...
+            (_, ty) <- runElabType0NoSMT env t `debug` ("Elab (no SMT): " ++ pprint infixM t)
             t' <- translate env l t (quote0 ty)
             xs' <- translateExpImpApp env l xs
             return $ E t':xs'
         translateExpImpApp env l (I t:xs) = do
-            (_, ty) <- runElabType0 False env t `debug` ("Elab: " ++ pprint infixM t)
+            (_, ty) <- runElabType0NoSMT env t `debug` ("Elab (no SMT): " ++ pprint infixM t)
             t' <- translate env l t (quote0 ty)
             xs' <- translateExpImpApp env l xs
             return $ I t':xs'

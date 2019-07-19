@@ -273,9 +273,8 @@ end
 
 def b = IdIR {'empty} {{| |}} {∅} end
 
-translate b to LaTeX where
-  output = "./out.tex"
-end
+translate b to LaTeX end
+
 
 -- def testFBad = subst (Cons 'x (const '0) (Cons 'y (var 'y) Nil)) (R '+ (var 'x ∷ var 'y ∷ ∅)) end
 def testF = subst 
@@ -379,7 +378,7 @@ elab_test = do
         Right g -> putStrLn $ show g
 
 
-elab verboseFlag fName = do
+elab printSummary fName = do
   s <- readFile fName
   let start_loc = bimap Row Col (0,0)
   case parseG (pretokenize start_loc) infixLang $ toS s of
@@ -399,7 +398,7 @@ elab verboseFlag fName = do
                         output
                     case r of
                         Left e -> putStrLn e
-                        Right g -> if verboseFlag then putStrLn $ show g else pure () -- 
+                        Right g -> if printSummary then putStrLn $ show g else pure () -- 
                   -- putStrLn "\nParsed and pretty printed output:\n"
                   -- putStrLn $ pprint $ map (declMap unTok) x
               (xs,_) -> fail $ "Ambiguous parse:\n" ++ (intercalate "\n" $ map (Core.pprint) (xs :: [[Core.Decl (Token Text)]]))
