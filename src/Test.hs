@@ -378,7 +378,7 @@ elab_test = do
         Right g -> putStrLn $ show g
 
 
-elab printSummary fName = do
+elab printSummary smtLog fName = do
   s <- readFile fName
   let start_loc = bimap Row Col (0,0)
   case parseG (pretokenize start_loc) infixLang $ toS s of
@@ -395,7 +395,7 @@ elab printSummary fName = do
                       foldM 
                         (defineDecl @(ExceptT String IO) True) 
                         emptyΓ{infixM = M.fromList $ map (\x@Infix{..} -> (symb, x)) is} 
-                        output
+                        (if smtLog then SMTOptDef (SMTLogEnabled True):output else output)
                     case r of
                         Left e -> putStrLn e
                         Right g -> if printSummary then putStrLn $ show g else pure () -- 

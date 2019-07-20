@@ -27,7 +27,7 @@ source-repository head
 
 library
   exposed-modules:
-      Lib, Core, Test, LamPi, UnicodeEnc
+      Lib, Core, Test, LamPi
   other-modules:
       Paths_toolbox3
   hs-source-dirs:
@@ -49,6 +49,7 @@ library
     , data-has
     , unordered-containers
     , process
+    , aeson
   default-language: Haskell2010
 
 executable toolbox3-exe
@@ -72,6 +73,7 @@ executable toolbox3-exe
     , yi-rope
     , mtl
     , text
+    , optparse-applicative
   default-language: Haskell2010
 
 test-suite toolbox3-test
