@@ -774,6 +774,8 @@ addToSATDefs i = modify (\s -> modifier (\(SATDefs ys) -> SATDefs $ S.insert i y
 toSExprMaybe :: Map Text (SExpr Text Int) -> Set Int -> Term -> Maybe SMT.SExpr
 toSExprMaybe _ _ PropT = pure $ SMT.tBool
 toSExprMaybe _ _ NameT = pure $ SMT.const "String"
+toSExprMaybe _ _ IntT = pure $ SMT.const "Int"
+toSExprMaybe _ _ (MkInt i) = pure $ SMT.const $ toS $ show i
 toSExprMaybe _ _ (MkName s) = pure $ SMT.const $ "\"" ++ toS s ++ "\""
 toSExprMaybe smap defMetas (SetT a) = (\x -> SMT.fun "Set" [x]) <$> toSExprMaybe smap defMetas a
 toSExprMaybe smap defMetas (MkSet a []) = 
@@ -819,16 +821,27 @@ fromSExprMaybe unLiftMap (SMT.List [SMT.Atom "union", xs, ys])        (VSetT a) 
     (MkSet a' xs') <- fromSExprMaybe unLiftMap xs (VSetT a)
     (MkSet _ ys') <- fromSExprMaybe unLiftMap ys (VSetT a)
     return $ MkSet a' $ xs' ++ ys'
-fromSExprMaybe unLiftMap trm τ = unlift unLiftMap trm
-    where
-        unlift :: Map Text Text -> SMT.SExpr -> Maybe Term
-        unlift unLiftMap (SMT.List [SMT.Atom "as",trm,_]) = unlift unLiftMap trm
-        unlift unLiftMap (SMT.Atom n) = C <$> M.lookup (toS n) unLiftMap
-        unlift unLiftMap (SMT.List (x:xs)) = do
-            x' <- unlift unLiftMap x
-            xs' <- mapM (unlift unLiftMap) xs
-            return $ x' :@: map E xs'
-        unlift _ t = error $ "unsupported operation " ++ SMT.showsSExpr t ""
+fromSExprMaybe unLiftMap (SMT.List [SMT.Atom "as",trm,_]) τ = fromSExprMaybe unLiftMap trm τ
+fromSExprMaybe unLiftMap (SMT.Atom n) _ = C <$> M.lookup (toS n) unLiftMap
+fromSExprMaybe unLiftMap (SMT.List (x:xs)) (VΠ _ τ τ') = do
+    x' <- fromSExprMaybe unLiftMap x τ
+    xs' <- mapM (\(trm,ty) -> fromSExprMaybe unLiftMap trm ty) (zip xs $ map (\t -> eval t holes) $ unfoldPis $ quote0 (τ' (VNeutral (NFree InferMeta))))
+    return $ x' :@: map E xs'
+  where
+    -- this looks rather hacky... however we can safely assume there are no dependent types/can ignore them
+    -- as we are only interested in keeping enough type infromation to disambiguate the basic types like
+    -- Int and Name. Since the returned term will be elaborated anyway, it should be ok to just stick an
+    -- InferMeta everywhere and we should hopefully have enough information to deduce all the holes...
+    unfoldPis :: Term -> [Term]
+    unfoldPis (Π _ τ τ') = τ : unfoldPis τ'
+    unfoldPis (IΠ _ τ') = unfoldPis τ'
+    unfoldPis (_ :⇒: τ') = unfoldPis τ'
+    unfoldPis τ = [τ]
+
+    holes = VNeutral (NFree InferMeta) : holes
+
+fromSExprMaybe _ t _ = error $ "unsupported operation " ++ SMT.showsSExpr t ""
+
 
 defineMetas :: (MonadIO m, Has SMTSolver s, Has Γ s, Has SATDefs s, MonadState s m, MonadError String m) => 
     Term -> m ()
